@@ -24,25 +24,28 @@ export DASHSCOPE_API_KEY="your_api_key_here"
 ## Usage
 
 ### Transcription (ASR)
-Transcribe any local audio file to text:
 ```bash
-python3 transcribe.py path/to/audio.wav
+python3 src/transcribe.py path/to/audio.wav
 ```
-Supports `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, and `.aac`.
 
 ### Synthesis (TTS)
-Generate Sichuan dialect speech from text:
 ```bash
 # Female voice (Sunny)
-python3 synthesize.py "今天天气好安逸哦" -g female -o output.wav
+python3 src/synthesize.py "今天天气好安逸哦" -g female -o output.wav
 
 # Male voice (Eric)
-python3 synthesize.py "今天天气好安逸哦" -g male -o output.wav
+python3 src/synthesize.py "今天天气好安逸哦" -g male -o output.wav
+```
+
+## Testing
+Run the unit tests:
+```bash
+PYTHONPATH=src python3 tests/test_scripts.py
 ```
 
 ## Repository Contents
-- `transcribe.py`: Streamlined transcription script.
-- `synthesize.py`: Streamlined synthesis script with Sichuan voice mapping.
+- `src/`: Core Python scripts.
+- `tests/`: Unit tests.
 - `requirements.txt`: Python dependencies.
 
 ## License

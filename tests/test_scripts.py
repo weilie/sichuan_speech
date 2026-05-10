@@ -1,9 +1,13 @@
+import sys
+import os
+
+# Add src to sys.path so we can import the modules
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
+
 import unittest
 from unittest.mock import patch, MagicMock
-import os
-import sys
 
-# Import the functions from our scripts
+# Import from the new location
 from transcribe import transcribe
 from synthesize import synthesize
 
@@ -14,7 +18,6 @@ class TestSichuanSpeech(unittest.TestCase):
     @patch('os.path.getsize')
     @patch('os.getenv')
     def test_transcribe_success(self, mock_getenv, mock_getsize, mock_exists, mock_call):
-        # Setup mocks
         mock_getenv.return_value = "fake_key"
         mock_exists.return_value = True
         mock_getsize.return_value = 100
@@ -26,12 +29,10 @@ class TestSichuanSpeech(unittest.TestCase):
         ]
         mock_call.return_value = mock_response
 
-        # We use a context manager to capture stdout since transcribe prints the result
         from io import StringIO
         captured_output = StringIO()
         sys.stdout = captured_output
         
-        # Test with a dummy file name
         with patch('builtins.open', unittest.mock.mock_open(read_data=b"dummy")):
             transcribe("test.wav")
             
@@ -42,7 +43,6 @@ class TestSichuanSpeech(unittest.TestCase):
     @patch('urllib.request.urlretrieve')
     @patch('os.getenv')
     def test_synthesize_success(self, mock_getenv, mock_retrieve, mock_call):
-        # Setup mocks
         mock_getenv.return_value = "fake_key"
         
         mock_response = MagicMock()
@@ -52,15 +52,11 @@ class TestSichuanSpeech(unittest.TestCase):
         }
         mock_call.return_value = mock_response
 
-        # Test synthesis
         synthesize("你好", "output.wav", "female")
         
-        # Verify dashscope was called with correct voice
         args, kwargs = mock_call.call_args
         self.assertEqual(kwargs['voice'], "Sunny")
         self.assertEqual(kwargs['text'], "你好")
-        
-        # Verify download was attempted
         mock_retrieve.assert_called_once_with("http://fake.url/audio.wav", "output.wav")
 
 if __name__ == '__main__':
