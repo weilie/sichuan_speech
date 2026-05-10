@@ -10,12 +10,16 @@ import dashscope
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
 
-def synthesize(text, output_file, voice):
+def synthesize(text, output_file, gender):
     api_key = os.getenv("DASHSCOPE_API_KEY")
     if not api_key:
         sys.exit("Error: DASHSCOPE_API_KEY environment variable not set.")
 
-    print(f"Synthesizing with voice '{voice}'...")
+    # Map gender to specific Sichuan voices
+    voice_map = {"female": "Sunny", "male": "Eric"}
+    voice = voice_map.get(gender, "Sunny")
+
+    print(f"Synthesizing with {gender} voice ({voice})...")
 
     try:
         response = dashscope.MultiModalConversation.call(
@@ -45,8 +49,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Synthesize Sichuan-dialect TTS using Qwen3-TTS")
     parser.add_argument("text", help="Text to synthesize")
     parser.add_argument("-o", "--output", default="sichuan_output.wav", help="Output WAV file path")
-    parser.add_argument("-v", "--voice", default="Sunny", choices=["Sunny", "Eric"], 
-                        help="Sichuan voice: Sunny (female) or Eric (male)")
+    parser.add_argument("-g", "--gender", default="female", choices=["female", "male"], 
+                        help="Sichuan voice gender: female (Sunny) or male (Eric)")
     args = parser.parse_args()
     
-    synthesize(args.text, args.output, args.voice)
+    synthesize(args.text, args.output, args.gender)
