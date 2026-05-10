@@ -37,6 +37,18 @@ python3 src/synthesize.py "今天天气好安逸哦" -g female -o output.wav
 python3 src/synthesize.py "今天天气好安逸哦" -g male -o output.wav
 ```
 
+### Real-Time Voice-to-Voice Chat
+Start a live, full-duplex voice conversation in the Sichuan dialect. This requires a working microphone and speakers.
+```bash
+# Start a chat with the female voice (Sunny)
+python3 src/chat_omni.py -g female
+
+# Start a chat with the male voice (Eric)
+python3 src/chat_omni.py -g male
+```
+
+*(Press `Ctrl+C` to end the conversation).*
+
 ## Testing
 Run the unit tests:
 ```bash
