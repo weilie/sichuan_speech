@@ -7,13 +7,10 @@ import sys
 import argparse
 import urllib.request
 import dashscope
-
-dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
+from utils import setup_dashscope, handle_api_response
 
 def synthesize(text, output_file, gender):
-    api_key = os.getenv("DASHSCOPE_API_KEY")
-    if not api_key:
-        sys.exit("Error: DASHSCOPE_API_KEY environment variable not set.")
+    api_key = setup_dashscope()
 
     # Map gender to specific Sichuan voices
     voice_map = {"female": "Sunny", "male": "Eric"}
@@ -31,11 +28,9 @@ def synthesize(text, output_file, gender):
             stream=False,
         )
 
-        if response.status_code != 200:
-            sys.exit(f"API Error ({response.status_code}): {response.message}")
+        output = handle_api_response(response, "Synthesis failed")
 
         # Extract URL (handles different possible response shapes)
-        output = response.output
         audio_url = output.get("audio", {}).get("url") or \
                     output["choices"][0]["message"]["content"][0]["audio"]["url"]
 

@@ -7,14 +7,12 @@ import base64
 import mimetypes
 import argparse
 import dashscope
+from utils import setup_dashscope, handle_api_response
 
-dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
 MAX_SIZE_BYTES = 10 * 1024 * 1024
 
 def transcribe(audio_file, language="zh", hotwords=None):
-    api_key = os.getenv("DASHSCOPE_API_KEY")
-    if not api_key:
-        sys.exit("Error: DASHSCOPE_API_KEY environment variable not set.")
+    api_key = setup_dashscope()
 
     if not os.path.exists(audio_file):
         sys.exit(f"Error: File '{audio_file}' not found.")
@@ -22,18 +20,8 @@ def transcribe(audio_file, language="zh", hotwords=None):
     if os.path.getsize(audio_file) > MAX_SIZE_BYTES:
         sys.exit("Error: File exceeds 10 MB limit.")
 
-    mime_type = mimetypes.guess_type(audio_file)[0]
-    if not mime_type:
-        ext = os.path.splitext(audio_file)[1].lower()
-        mime_type = {
-            ".mp3": "audio/mpeg", 
-            ".wav": "audio/wav", 
-            ".m4a": "audio/mp4",
-            ".flac": "audio/flac",
-            ".ogg": "audio/ogg",
-            ".aac": "audio/aac"
-        }.get(ext, "audio/wav")
-
+    mime_type = mimetypes.guess_type(audio_file)[0] or "audio/wav"
+    
     try:
         with open(audio_file, "rb") as f:
             audio_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -53,10 +41,8 @@ def transcribe(audio_file, language="zh", hotwords=None):
             asr_options=asr_options,
         )
 
-        if response.status_code != 200:
-            sys.exit(f"API Error ({response.status_code}): {response.message}")
-
-        print(response.output.choices[0].message.content[0]["text"])
+        output = handle_api_response(response, "Transcription failed")
+        print(output.choices[0].message.content[0]["text"])
 
     except Exception as e:
         sys.exit(f"Transcription failed: {e}")
