@@ -4,10 +4,17 @@ Supports full-duplex Sichuan-dialect conversations.
 """
 import os
 import sys
+import time
+import base64
 import argparse
 import pyaudio
 import dashscope
-from dashscope.audio.qwen_omni import OmniRealtimeConversation, OmniRealtimeCallback
+from dashscope.audio.qwen_omni import (
+    OmniRealtimeConversation,
+    OmniRealtimeCallback,
+    MultiModality,
+    AudioFormat,
+)
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
 URL = 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime'
@@ -22,6 +29,10 @@ CHUNK = 1600     # 100ms chunks at 16kHz
 
 class VoiceBotCallback(OmniRealtimeCallback):
     """Handles real-time events from the model."""
+    # Mic stays muted for this long after the last assistant audio chunk,
+    # to let the speaker tail finish before we resume listening.
+    MIC_UNMUTE_DELAY = 0.4
+
     def __init__(self):
         super().__init__()
         self.pya = pyaudio.PyAudio()
@@ -31,32 +42,34 @@ class VoiceBotCallback(OmniRealtimeCallback):
             rate=RATE_OUT,
             output=True
         )
+        self.assistant_speaking_until = 0.0
+
+    def mic_muted(self) -> bool:
+        return time.monotonic() < self.assistant_speaking_until
 
     def on_open(self):
         print("\n[Bot is listening... Start speaking! Press Ctrl+C to stop]")
 
-    def on_close(self):
+    def on_close(self, close_status_code=None, close_msg=None):
         print("\n[Connection Closed]")
         self.stream_out.stop_stream()
         self.stream_out.close()
         self.pya.terminate()
 
     def on_event(self, event):
-        # Print transcription as it arrives
-        if event.event_name == 'response.audio_transcript.delta':
-            print(event.payload.get('delta', ''), end='', flush=True)
-        elif event.event_name == 'response.audio_transcript.done':
-            print("\n")
-        
-        # Also print the user's input transcription (if provided)
-        elif event.event_name == 'conversation.item.input_audio_transcription.delta':
-             pass # Optionally print user transcription here
+        event_type = event.get('type', '')
 
-        # Play back audio chunks directly to the speaker
-        elif event.event_name == 'response.audio.delta':
-            audio_data = event.get_audio_data()
-            if audio_data:
-                self.stream_out.write(audio_data)
+        if event_type == 'response.audio_transcript.delta':
+            print(event.get('delta', ''), end='', flush=True)
+        elif event_type == 'response.audio_transcript.done':
+            print("\n")
+        elif event_type == 'response.audio.delta':
+            delta = event.get('delta')
+            if delta:
+                self.stream_out.write(base64.b64decode(delta))
+                self.assistant_speaking_until = (
+                    time.monotonic() + self.MIC_UNMUTE_DELAY
+                )
 
     def on_error(self, error):
         print(f"\n[Error]: {error}")
@@ -77,22 +90,21 @@ def run_chat(gender):
     
     callback = VoiceBotCallback()
     
-    # Configure the conversation
     conv = OmniRealtimeConversation(
         model=MODEL,
         url=URL,
         callback=callback,
-        # Set parameters for the voice
-        parameters={
-            "voice": voice,
-            "format": "pcm",
-            "sample_rate": RATE_OUT
-        }
     )
 
     try:
         conv.connect()
-        
+        conv.update_session(
+            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+            voice=voice,
+            input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+            output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+        )
+
         # Initialize Microphone
         p = pyaudio.PyAudio()
         stream_in = p.open(
@@ -102,11 +114,13 @@ def run_chat(gender):
             input=True,
             frames_per_buffer=CHUNK
         )
-        
+
         # Continuous loop to read mic and send to WebSocket
         while True:
             data = stream_in.read(CHUNK, exception_on_overflow=False)
-            conv.send_audio(data)
+            if callback.mic_muted():
+                continue
+            conv.append_audio(base64.b64encode(data).decode("ascii"))
 
     except KeyboardInterrupt:
         print("\nStopping chat...")
