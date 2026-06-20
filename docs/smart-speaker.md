@@ -37,11 +37,17 @@ choice below.
   occasional unplug/power loss without corrupting state.
 - **Home Wi-Fi.** Parents' SSID and password pre-flashed before
   transport. No enterprise auth.
-- **Inference is cloud-side.** DashScope `qwen3-omni-flash-realtime`
-  over full-duplex WebSocket. The Pi only does audio I/O, wake-word,
-  and orchestration — no heavy local ML.
-- **Latency budget.** Conversational. Dominated by network RTT to
-  Alibaba Singapore, not the Pi.
+- **Inference is cloud-side.** DashScope Qwen Omni. Two transport
+  paths are kept on the table — `qwen3-omni-flash-realtime` over a
+  full-duplex WebSocket (low latency, supports barge-in) and the
+  non-realtime `qwen3-omni-flash` request/response API (simpler,
+  validated end-to-end on Pi 3). v1 decides which one ships, or
+  supports both behind a runtime flag. The Pi only does audio I/O,
+  wake-word, and orchestration — no heavy local ML.
+- **Latency budget.** Conversational. Press-to-talk round-trip
+  measured at ~5–6 s on Pi 3 over 2.4 GHz Wi-Fi to Alibaba SG,
+  which is borderline acceptable; 5 GHz on Pi 4/5 is expected to
+  improve it.
 - **Cost-bounded.** DashScope is metered. The device must not be
   able to silently burn through the budget if something gets stuck.
 
@@ -101,10 +107,22 @@ choice below.
 
 ### 5.1 Current state
 
-`src/chat_omni.py` is a working CLI tool that does full-duplex voice
-chat over a WebSocket to DashScope's `qwen3-omni-flash-realtime`. It
-runs on a laptop today. It is not yet a daemon, has no wake-word
-detection, no reliability layer, and assumes a human is at the terminal.
+Two single-turn CLI tools exist, both in `src/`:
+
+- `converse.py` — **press-to-talk, validated.** Records a fixed
+  window, sends it to `qwen3-omni-flash` as a streaming request,
+  plays the response. Confirmed end-to-end on Pi 3 + ReSpeaker
+  2-Mics HAT V2 + Dayton DMA45-4 driver, replying in Sichuan
+  dialect with the Sunny voice. Round-trip ~5–6 s over 2.4 GHz.
+- `chat_omni.py` — **realtime, partly working on Pi.** Full-duplex
+  WebSocket to `qwen3-omni-flash-realtime`. Session opens, mic
+  audio uploads, server-VAD fires, transcript and `response.done`
+  arrive — but no `response.audio.delta` payloads. Same code works
+  from the Mac; root cause not yet found. Suspected Pi-specific
+  buffering or SDK behavior. Tracked as a Phase 1 open item.
+
+Neither is yet a daemon. Neither has wake-word detection, end-of-
+speech detection, multi-turn memory, or a reliability layer.
 
 ### 5.2 Target shape
 
@@ -120,25 +138,49 @@ detection, no reliability layer, and assumes a human is at the terminal.
    │   HAT      │        │ (Python)       │
    └────────────┘        └──┬─────────┬───┘
                             │         │
-                            │         └──▶ local wake-word detector
+                            │         └──▶ local wake-word + VAD
                             │
-                            │ WebSocket (wss) — opened only on wake
+                            │  realtime: WebSocket (wss)
+                            │  or
+                            │  press-to-talk: HTTPS request/response
                             ▼
-                  DashScope Qwen3-Omni-Flash-Realtime
-                        (Alibaba Singapore)
+                  DashScope Qwen Omni (Alibaba Singapore)
+                  (qwen3-omni-flash-realtime
+                   or qwen3-omni-flash)
 ```
 
 A single Python daemon owns audio I/O, the local wake-word detector,
-the DashScope WebSocket session (opened on wake, closed at end of
-conversation), audio-cue playback, and reconnect logic. A lightweight
-heartbeat task within the daemon publishes liveness to a maintainer-
-controlled endpoint.
+end-of-speech detection, the DashScope session, audio-cue playback,
+reconnect logic, and multi-turn message history within a conversation.
+Transport — realtime WebSocket vs press-to-talk HTTPS — is a runtime
+choice; the same daemon supports both, and v1 may ship one or both.
+A lightweight heartbeat task within the daemon publishes liveness to
+a maintainer-controlled endpoint.
 
 ### 5.3 Concerns to address (specifics decided per phase)
 
 - **Wake-word detection.** Runs on-device; no audio leaves the Pi
   until it fires. Library (openWakeWord, Porcupine, etc.) and phrase
-  chosen in Phase 1.
+  chosen in Phase 1. Pi 3 RAM (1 GB) may rule out heavier libraries —
+  this is part of the Pi 4/5 decision.
+
+- **End-of-speech detection.** Press-to-talk currently uses a fixed
+  5 s window. v1 needs "stop when user pauses" so utterances are not
+  truncated and silences are not wasted. Realtime path gets this
+  for free from server-side VAD; press-to-talk needs an on-device
+  VAD (WebRTC VAD or similar).
+
+- **Multi-turn memory within a conversation.** The bot should
+  remember "what we were just talking about" across two or three
+  follow-up turns. Realtime path: server keeps state per session.
+  Press-to-talk path: client sends prior `messages` array each turn,
+  capped at a small history window. Required for v1; do not confuse
+  with cross-conversation memory which is out of scope.
+
+- **Realtime audio-delta missing on Pi.** `chat_omni.py` from a Pi
+  receives `response.audio_transcript.delta` and `response.audio.done`
+  but never the actual `response.audio.delta` payload. Same code,
+  same SDK, same key works from Mac. Debug owner: Phase 1.
 
 - **Audio cues for state.** Short pre-recorded WAVs for boot, wake,
   errors, and prolonged offline. Replaces the LED feedback we don't
@@ -172,51 +214,67 @@ controlled endpoint.
 
 ### 5.4 Deliberately out of v1
 
-Voice barge-in, bot-initiated speech, on-device Wi-Fi onboarding,
-battery backup, cross-conversation memory beyond the model's default,
-and a polished Sichuanese persona prompt — all deferred to later phases.
+Voice barge-in (requires realtime path to be working and a real AEC
+strategy), bot-initiated speech, on-device Wi-Fi onboarding, battery
+backup, cross-conversation memory across sessions, and a polished
+Sichuanese persona prompt — all deferred to later phases.
 
 ---
 
 ## 6. Phased Roadmap
 
-### Phase 0 — Bench prototype (in progress)
+### Phase 0 — Bench prototype (complete)
 - ✅ `chat_omni.py` works end-to-end from a laptop, over WebSocket, in
   Sichuan dialect.
 - ✅ `chat_omni.py` boots and runs the WebSocket against DashScope from
   the on-hand Pi 3 Model B v1.2 (driven over SSH from the laptop).
-  Audio I/O hardware not yet attached.
-- ⬜ Mount the ReSpeaker HAT + Dayton DMA45-4 driver on the Pi 3 and
-  run `chat_omni.py` against real hardware end-to-end.
-- ⬜ Confirm round-trip latency over residential Wi-Fi is
-  conversational, **on 2.4 GHz from the Pi 3** — this is a stress
-  test, not the deployment target, but failure here may force the
-  Pi 4/5 decision earlier.
-- ⬜ Confirm the ReSpeaker HAT and DMA45-4 driver work together at
-  acceptable volume and clarity in a representative room.
-- ⬜ Decide Pi 4 (4 GB) vs Pi 5 (4 GB) for v1 based on Phase 0
-  findings: jitter on 5 GHz Wi-Fi, CPU headroom for the wake-word
-  library chosen in Phase 1, BOM constraints.
+- ✅ Mount the ReSpeaker 2-Mics HAT V2 + Dayton DMA45-4 driver on the
+  Pi 3. Audio I/O verified — mic captures, speaker plays via Sunny
+  voice. Driver = upstream Pi OS `respeaker-2mic-v2_0` overlay (the
+  HAT codec is actually a TI TLV320AIC3104, not the WM8960 the listing
+  claims). `~/.asoundrc` routes the ALSA default through `plughw:2,0`.
+- ✅ `converse.py` (press-to-talk) runs end-to-end on Pi 3 over 2.4 GHz
+  Wi-Fi to Alibaba SG. Round-trip ~5–6 s. Reply quality acceptable in
+  Sichuan dialect with a system prompt.
+- ⏸ `chat_omni.py` (realtime) connects from the Pi and sees server
+  transcript/done events, but no `response.audio.delta` payloads arrive
+  on Pi specifically. Same code works from Mac. Carried into Phase 1 as
+  an explicit debug task; do not block Phase 1 on it.
+- ⏸ Pi 3 → Pi 4/5 decision deferred to Phase 1 once wake-word library
+  is picked and RAM/CPU footprint is known.
 
 ### Phase 1 — Standalone wake-word device (MVP shipped to parents)
-- ⬜ Pick a wake-word library and phrase; get continuous on-device
-  detection working without burning CPU.
-- ⬜ Refactor `chat_omni.py` into a daemon: wake → open WebSocket →
-  stream conversation → follow-up window → close. Clean reconnect.
+
+Conversation-shape work (turns the prototype into a usable Alexa-like
+interaction):
+- ⬜ Wake-word library + phrase. Continuous on-device detection,
+  acceptable CPU/RAM (gates the Pi 4/5 choice).
+- ⬜ End-of-speech detection for the press-to-talk path (WebRTC VAD
+  on-device, or equivalent). Replaces the fixed 5 s window in
+  `converse.py`.
+- ⬜ Multi-turn conversation memory within a session. Both paths.
+- ⬜ Resolve realtime `response.audio.delta` missing on Pi (carried
+  from Phase 0). If solvable, ship both realtime and press-to-talk
+  behind a runtime flag; if not, ship press-to-talk only.
+- ⬜ Daemon shape: wake → record/stream → reply → follow-up window →
+  idle. Clean reconnect on network blips.
+
+Device-shape work (makes it deployable to parents):
 - ⬜ Record audio cues and ship as WAV assets.
-- ⬜ Decide and implement echo handling (gate, AEC, or both) on real
-  hardware.
-- ⬜ Cost protection: Alibaba console caps + on-device usage limits
-  with a graceful degraded mode.
-- ⬜ Reliability layer: systemd unit, time-sync wait before WSS, log
-  caps, SSD boot if used.
-- ⬜ Remote access: Tailscale + fallback hotspot SSID + parents'
-  Wi-Fi all pre-flashed before transport.
+- ⬜ Echo handling: at minimum gate the wake-word detector during bot
+  speech. Decide on additional AEC after measuring on real hardware
+  in the enclosure.
+- ⬜ Cost protection: Alibaba console hard caps + on-device usage
+  limits with a graceful degraded mode.
+- ⬜ Reliability layer: systemd unit, time-sync wait before any cloud
+  call, log caps, SSD boot if used.
+- ⬜ Remote access: Tailscale + fallback hotspot SSID + parents' Wi-Fi
+  pre-flashed before transport.
 - ⬜ Health alerting: heartbeat endpoint, daemon posts to it,
   missing-heartbeat alert to maintainer's phone.
 - ⬜ 3D-printed enclosure v1.
 - ⬜ Multi-week soak at maintainer's home, including forced Wi-Fi
-  outage, unclean shutdown, and WebSocket kill. Verify recovery
+  outage, unclean shutdown, and cloud-session kill. Verify recovery
   and that health alerts fire.
 - ⬜ Transport and install at parents'.
 
@@ -243,8 +301,10 @@ and a polished Sichuanese persona prompt — all deferred to later phases.
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-06-13
+- Last updated: 2026-06-20
 - Owner: maintainer
-- Next review: after the ReSpeaker HAT + DMA45-4 arrive and Phase 0
-  bench validation on the on-hand Pi 3 finishes — at which point the
-  Pi 4 vs Pi 5 decision for v1 should be informed by real numbers.
+- Next review: when Phase 1's first conversation-shape items (wake
+  word, end-of-speech, multi-turn, realtime audio-delta debug) start
+  landing — at that point the Pi 4 vs Pi 5 decision should be
+  informed by real numbers and the realtime-vs-press-to-talk
+  ship/skip question should be answerable.
