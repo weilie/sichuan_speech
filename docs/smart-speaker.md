@@ -107,22 +107,23 @@ choice below.
 
 ### 5.1 Current state
 
-Two single-turn CLI tools exist, both in `src/`:
+Two CLI tools exist, both in `src/`:
 
 - `converse.py` — **press-to-talk, validated.** Records a fixed
   window, sends it to `qwen3-omni-flash` as a streaming request,
   plays the response. Confirmed end-to-end on Pi 3 + ReSpeaker
   2-Mics HAT V2 + Dayton DMA45-4 driver, replying in Sichuan
   dialect with the Sunny voice. Round-trip ~5–6 s over 2.4 GHz.
-- `chat_omni.py` — **realtime, partly working on Pi.** Full-duplex
-  WebSocket to `qwen3-omni-flash-realtime`. Session opens, mic
-  audio uploads, server-VAD fires, transcript and `response.done`
-  arrive — but no `response.audio.delta` payloads. Same code works
-  from the Mac; root cause not yet found. Suspected Pi-specific
-  buffering or SDK behavior. Tracked as a Phase 1 open item.
+- `chat_omni.py` — **realtime, multi-turn validated.** WebSocket
+  to `qwen3-omni-flash-realtime`. Server-VAD detects end of
+  speech; client opens/closes the mic around bot reply because
+  the HAT codec (TLV320AIC3104) does not let ALSA hold input and
+  output concurrently. Multi-turn Sichuan dialect conversation
+  reproduced on the bench Pi 3.
 
-Neither is yet a daemon. Neither has wake-word detection, end-of-
-speech detection, multi-turn memory, or a reliability layer.
+Neither is yet a daemon. Neither has wake-word detection, on-
+device end-of-speech detection, persistent multi-turn memory
+across sessions, or a reliability layer.
 
 ### 5.2 Target shape
 
@@ -177,10 +178,25 @@ a maintainer-controlled endpoint.
   capped at a small history window. Required for v1; do not confuse
   with cross-conversation memory which is out of scope.
 
-- **Realtime audio-delta missing on Pi.** `chat_omni.py` from a Pi
-  receives `response.audio_transcript.delta` and `response.audio.done`
-  but never the actual `response.audio.delta` payload. Same code,
-  same SDK, same key works from Mac. Debug owner: Phase 1.
+- **HAT codec is half-duplex.** Reproduced in isolation: when
+  PyAudio holds the mic open, output through any path (PyAudio,
+  `aplay`, PulseAudio) is silenced. Even a single full-duplex
+  PortAudio stream is silenced. This is an ALSA/codec exclusivity
+  on the TLV320AIC3104, not a software bug. `chat_omni.py` works
+  around it by closing the mic when bot speech starts and
+  reopening on `response.done`. Barge-in is *unachievable* on
+  this hardware path; pursuing it would require a different audio
+  topology (e.g. separate USB mic + USB speaker).
+
+- **PortAudio ALSA errors during mic close/reopen.** The
+  transition prints `PaAlsaStream_WaitForFrames` failures to
+  stderr but the system recovers each turn. Cosmetic for now;
+  worth filing if Phase 1 surfaces an actual reliability impact.
+
+- **Server-side "Response timeout" if user dithers.** Realtime
+  WebSocket sessions get killed by the server when there is no
+  clear speech soon after `session.updated`. v1 should either
+  open the session lazily at wake-time, or send periodic pings.
 
 - **Audio cues for state.** Short pre-recorded WAVs for boot, wake,
   errors, and prolonged offline. Replaces the LED feedback we don't
@@ -236,10 +252,11 @@ Sichuanese persona prompt — all deferred to later phases.
 - ✅ `converse.py` (press-to-talk) runs end-to-end on Pi 3 over 2.4 GHz
   Wi-Fi to Alibaba SG. Round-trip ~5–6 s. Reply quality acceptable in
   Sichuan dialect with a system prompt.
-- ⏸ `chat_omni.py` (realtime) connects from the Pi and sees server
-  transcript/done events, but no `response.audio.delta` payloads arrive
-  on Pi specifically. Same code works from Mac. Carried into Phase 1 as
-  an explicit debug task; do not block Phase 1 on it.
+- ✅ `chat_omni.py` (realtime) multi-turn Sichuan-dialect conversation
+  works on the Pi 3 + HAT V2 with a half-duplex codec hand-off. Hidden
+  hardware constraint discovered: the HAT codec does not allow ALSA to
+  hold mic input and audio output at the same time, so barge-in is not
+  possible on this hardware path. Documented in §5.3.
 - ⏸ Pi 3 → Pi 4/5 decision deferred to Phase 1 once wake-word library
   is picked and RAM/CPU footprint is known.
 
@@ -253,9 +270,11 @@ interaction):
   on-device, or equivalent). Replaces the fixed 5 s window in
   `converse.py`.
 - ⬜ Multi-turn conversation memory within a session. Both paths.
-- ⬜ Resolve realtime `response.audio.delta` missing on Pi (carried
-  from Phase 0). If solvable, ship both realtime and press-to-talk
-  behind a runtime flag; if not, ship press-to-talk only.
+- ⬜ Decide which transport (or both) ships in v1. Realtime gives
+  ~1–2 s lower time-to-first-audio and free server-side VAD, at the
+  cost of a fragile WebSocket lifecycle and the codec hand-off
+  complexity. Press-to-talk is simpler but needs client-side VAD
+  for end-of-speech detection.
 - ⬜ Daemon shape: wake → record/stream → reply → follow-up window →
   idle. Clean reconnect on network blips.
 
@@ -301,10 +320,10 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-06-20
+- Last updated: 2026-06-20 (second pass — realtime path validated)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
-  word, end-of-speech, multi-turn, realtime audio-delta debug) start
-  landing — at that point the Pi 4 vs Pi 5 decision should be
-  informed by real numbers and the realtime-vs-press-to-talk
-  ship/skip question should be answerable.
+  word, end-of-speech, multi-turn memory) start landing — at that
+  point the Pi 4 vs Pi 5 decision should be informed by real
+  numbers and the realtime-vs-press-to-talk decision should be
+  answerable.
