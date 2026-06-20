@@ -59,7 +59,7 @@ choice below.
 
 | Item | Notes | ~USD |
 |---|---|---|
-| Raspberry Pi (model TBD) | Decision deferred until Phase 0 finishes on the on-hand Pi 3. Realistic prices today: Pi 4 4 GB ~$100 (CanaKit/PiShop), Pi 5 4 GB ~$130 (Adafruit). 5 GHz Wi-Fi (Pi 4 and 5) matters for jitter to Alibaba SG; Pi 5 also has wake-word headroom for Phase 1. | $100–130 |
+| Raspberry Pi (model TBD) | Decision now gates on the Phase 1 wake-word benchmark on the on-hand Pi 3 (see §6 Phase 1). Phase 0 already showed: 2.4 GHz Wi-Fi is fast enough for the cloud call (5–6 s round-trip), and 1 GB RAM is sufficient for `chat_omni.py` or `converse.py` running alone. The open question is whether continuous wake-word detection fits *alongside* the chat daemon. Pi 4 4 GB ~$100 (CanaKit/PiShop), Pi 5 4 GB ~$130 (Adafruit); Pi 3 is $0 (already on hand). | $0–130 |
 | Official USB-C PSU | Pi 5 needs the 27 W official PSU; Pi 4 is happy with any ~15 W USB-C. Off-brand chargers cause undervoltage. | $8–12 |
 | Active cooler | Pi 5: official Active Cooler. Pi 4: heatsink + small fan. Without it the Pi throttles under sustained load. | $5 |
 | ReSpeaker 2-Mics Pi HAT (genuine Seeed) | Dual mics, WM8960 codec, JST speaker connector. The HAT's button and 3 RGB LEDs are left unused. Ordered 2026-06-13 from Amazon (B07CXSW6LB). Cheaper KEYESTUDIO clones exist (~$12) but the genuine board has better driver/community support. Compatible with Pi 3, 4, and 5. | $40 |
@@ -265,7 +265,24 @@ Sichuanese persona prompt — all deferred to later phases.
 Conversation-shape work (turns the prototype into a usable Alexa-like
 interaction):
 - ⬜ Wake-word library + phrase. Continuous on-device detection,
-  acceptable CPU/RAM (gates the Pi 4/5 choice).
+  acceptable CPU/RAM (gates the Pi 4/5 choice — see below). Try
+  Porcupine first (C, ~10 MB RAM). Fall back to openWakeWord
+  (Python + TFLite, ~80–150 MB RAM) only if Porcupine's phrase
+  set or false-wake rate is unacceptable.
+- ⬜ **Pi 3 vs Pi 4 gating benchmark.** With the chosen wake-word
+  library running continuously *alongside* `chat_omni.py`, soak
+  for ≥30 min on the bench Pi 3 and measure:
+   - `free -m`: working set stays under ~750 MB (≤80% of 1 GB).
+   - `top`: idle CPU stays under ~50% on each core; no thermal
+     throttling (`vcgencmd get_throttled` returns `throttled=0x0`).
+   - End-to-end conversation latency stays under ~6 s on 2.4 GHz Wi-Fi.
+   - No PortAudio/ALSA errors that wedge the daemon over the soak.
+
+   If all four pass: Pi 3 ships for v1 (huge BOM savings, SD-card
+   lifetime is the only residual risk — mitigated by the A2 high-
+   endurance card already in the BOM). If any fail: upgrade to
+   Pi 4 (4 GB), which also opens the door to SSD boot for 24/7
+   reliability.
 - ⬜ End-of-speech detection for the press-to-talk path (WebRTC VAD
   on-device, or equivalent). Replaces the fixed 5 s window in
   `converse.py`.
