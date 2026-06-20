@@ -264,11 +264,17 @@ Sichuanese persona prompt — all deferred to later phases.
 
 Conversation-shape work (turns the prototype into a usable Alexa-like
 interaction):
-- ⬜ Wake-word library + phrase. Continuous on-device detection,
-  acceptable CPU/RAM (gates the Pi 4/5 choice — see below). Try
-  Porcupine first (C, ~10 MB RAM). Fall back to openWakeWord
-  (Python + TFLite, ~80–150 MB RAM) only if Porcupine's phrase
-  set or false-wake rate is unacceptable.
+- ⬜ Wake-word library + phrase. **Use openWakeWord** (Apache 2.0
+  code; CC BY-NC-SA on pre-trained models, which is fine for this
+  non-commercial personal device). Rationale: the eventual product
+  wake phrase is a Sichuan-dialect Chinese phrase, which requires
+  a *custom-trained* model. Picovoice Porcupine's free tier lets
+  you train custom models but only deploys them on x86_64 — running
+  a custom Porcupine model on ARM/Pi requires a paid Enterprise
+  plan, which we don't want. openWakeWord's custom training is
+  free and runs anywhere. Phase 1 starts with one of the pre-
+  trained models (e.g., "hey jarvis"); training the actual Chinese
+  phrase is a later Phase 1 task or a Phase 2 polish.
 - ⬜ **Pi 3 vs Pi 4 gating benchmark.** With the chosen wake-word
   library running continuously *alongside* `chat_omni.py`, soak
   for ≥30 min on the bench Pi 3 and measure:
