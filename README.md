@@ -49,6 +49,17 @@ python3 src/chat_omni.py -g male
 
 *(Press `Ctrl+C` to end the conversation).*
 
+### Press-to-Talk Voice Chat
+Single-turn voice exchange against `qwen3-omni-flash` (non-realtime). Records
+a fixed-length clip, sends it as one request, and plays the response. This is
+the path validated on the Raspberry Pi 3 + ReSpeaker 2-Mics HAT in Phase 0 of
+the smart-speaker roadmap.
+```bash
+python3 src/converse.py -g female              # default 5 s recording, Sunny
+python3 src/converse.py -g male -d 8           # 8 s recording, Eric
+python3 src/converse.py --ready-wav ready.wav  # play a cue immediately before recording
+```
+
 ## Testing
 Run the unit tests:
 ```bash

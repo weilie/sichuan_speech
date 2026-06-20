@@ -53,16 +53,17 @@ choice below.
 
 | Item | Notes | ~USD |
 |---|---|---|
-| Raspberry Pi 5, 4 GB | Wi-Fi 5 dual-band matters for latency to Alibaba SG | $60 |
-| Official 27 W USB-C PSU | Pi 5 is strict about power; off-brand chargers cause undervoltage | $12 |
-| Active Cooler for Pi 5 | Without it the Pi throttles under sustained load | $5 |
-| ReSpeaker 2-Mic Pi HAT | Dual mics, WM8960 codec, JST speaker connector. The HAT's button and 3 RGB LEDs are left unused. | $15–18 |
-| USB SSD 128 GB (preferred) **or** A2 high-endurance microSD 64 GB | SSD is far more reliable for 24/7 operation. SD cards are the #1 failure mode for always-on Pi deployments. | $20 / $12 |
-| Full-range speaker driver, 3 W / 4 Ω | E.g. Dayton Audio CE32A-4. Far better than the $3 JST blob commonly bundled with the HAT. | $12 |
+| Raspberry Pi (model TBD) | Decision deferred until Phase 0 finishes on the on-hand Pi 3. Realistic prices today: Pi 4 4 GB ~$100 (CanaKit/PiShop), Pi 5 4 GB ~$130 (Adafruit). 5 GHz Wi-Fi (Pi 4 and 5) matters for jitter to Alibaba SG; Pi 5 also has wake-word headroom for Phase 1. | $100–130 |
+| Official USB-C PSU | Pi 5 needs the 27 W official PSU; Pi 4 is happy with any ~15 W USB-C. Off-brand chargers cause undervoltage. | $8–12 |
+| Active cooler | Pi 5: official Active Cooler. Pi 4: heatsink + small fan. Without it the Pi throttles under sustained load. | $5 |
+| ReSpeaker 2-Mics Pi HAT (genuine Seeed) | Dual mics, WM8960 codec, JST speaker connector. The HAT's button and 3 RGB LEDs are left unused. Ordered 2026-06-13 from Amazon (B07CXSW6LB). Cheaper KEYESTUDIO clones exist (~$12) but the genuine board has better driver/community support. Compatible with Pi 3, 4, and 5. | $40 |
+| USB SSD 128 GB (preferred) **or** A2 high-endurance microSD 64 GB | SSD is far more reliable for 24/7 operation. SD cards are the #1 failure mode for always-on Pi deployments. Pi 5 boots from USB 3.0 SSD or NVMe (with adapter HAT); Pi 4 boots from USB 3.0 SSD. | $20 / $12 |
+| Full-range speaker driver, 3 W / 4 Ω | Ordered the Dayton Audio DMA45-4 (1½", aluminum cone) from Amazon (B07N1YW3SV). This is a substitute for the originally spec'd Dayton CE32A-4 (1¼", paper cone, Parts Express SKU 295-356 at ~$6), which would have cost more once Parts Express's flat $9.95 shipping is included. | $17 |
 
-**Subtotal:** ~$125 with SSD, ~$115 with endurance microSD.
+**Subtotal:** ~$190 (Pi 4 + microSD) to ~$215 (Pi 5 + SSD). Higher than initial roadmap estimates: Pi board prices have crept up since the original BOM, and the genuine ReSpeaker HAT is ~2× the clone.
 
 ### Maintainer-supplied
+- Raspberry Pi 3 Model B v1.2 on hand — used as the Phase 0 bench. Not shipped to parents; limits to remember are 1 GB RAM, 2.4 GHz-only Wi-Fi, and onboard Bluetooth that can't do HFP reliably.
 - 3D-printed enclosure (designed and printed at home).
 - USB-C cable for power.
 - A laptop, used once, to flash the SD/SSD with Raspberry Pi Imager.
@@ -182,12 +183,20 @@ and a polished Sichuanese persona prompt — all deferred to later phases.
 ### Phase 0 — Bench prototype (in progress)
 - ✅ `chat_omni.py` works end-to-end from a laptop, over WebSocket, in
   Sichuan dialect.
-- ⬜ Bring up the same script on a Raspberry Pi 5 with the ReSpeaker
-  HAT and a real speaker.
+- ✅ `chat_omni.py` boots and runs the WebSocket against DashScope from
+  the on-hand Pi 3 Model B v1.2 (driven over SSH from the laptop).
+  Audio I/O hardware not yet attached.
+- ⬜ Mount the ReSpeaker HAT + Dayton DMA45-4 driver on the Pi 3 and
+  run `chat_omni.py` against real hardware end-to-end.
 - ⬜ Confirm round-trip latency over residential Wi-Fi is
-  conversational.
-- ⬜ Confirm the ReSpeaker HAT and chosen speaker driver work
-  together at acceptable volume and clarity in a representative room.
+  conversational, **on 2.4 GHz from the Pi 3** — this is a stress
+  test, not the deployment target, but failure here may force the
+  Pi 4/5 decision earlier.
+- ⬜ Confirm the ReSpeaker HAT and DMA45-4 driver work together at
+  acceptable volume and clarity in a representative room.
+- ⬜ Decide Pi 4 (4 GB) vs Pi 5 (4 GB) for v1 based on Phase 0
+  findings: jitter on 5 GHz Wi-Fi, CPU headroom for the wake-word
+  library chosen in Phase 1, BOM constraints.
 
 ### Phase 1 — Standalone wake-word device (MVP shipped to parents)
 - ⬜ Pick a wake-word library and phrase; get continuous on-device
@@ -234,6 +243,8 @@ and a polished Sichuanese persona prompt — all deferred to later phases.
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-06-11
+- Last updated: 2026-06-13
 - Owner: maintainer
-- Next review: after Phase 0 bench validation on real Pi 5 hardware.
+- Next review: after the ReSpeaker HAT + DMA45-4 arrive and Phase 0
+  bench validation on the on-hand Pi 3 finishes — at which point the
+  Pi 4 vs Pi 5 decision for v1 should be informed by real numbers.
