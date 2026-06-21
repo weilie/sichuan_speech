@@ -289,6 +289,18 @@ interaction):
    endurance card already in the BOM). If any fail: upgrade to
    Pi 4 (4 GB), which also opens the door to SSD boot for 24/7
    reliability.
+
+   **2026-06-20 status (partial):** openWakeWord (`hey_jarvis`) on
+   Pi 3 v1.2 + HAT V2 fired with scores 0.63–1.00 when CPU was not
+   throttled. RSS ~244 MB, predict ~92 ms/chunk (one core saturated,
+   three idle). Detection then **stopped firing** as sustained load
+   pushed the Pi into `throttled=0x50005` (under-voltage AND
+   currently-throttled). Temp was only 52 °C — *the throttle is from
+   inadequate 5 V supply, not heat*. The benchmark is therefore
+   inconclusive: Pi 3 may be CPU-sufficient if given a proper
+   5.1 V / 2.5 A PSU. To re-run cleanly: swap to a known-good Pi 3
+   PSU (or compare with Pi 4 + official 27 W USB-C), then rerun
+   the four-criterion soak.
 - ⬜ End-of-speech detection for the press-to-talk path (WebRTC VAD
   on-device, or equivalent). Replaces the fixed 5 s window in
   `converse.py`.
