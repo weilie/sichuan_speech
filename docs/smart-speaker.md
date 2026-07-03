@@ -301,6 +301,53 @@ interaction):
    5.1 V / 2.5 A PSU. To re-run cleanly: swap to a known-good Pi 3
    PSU (or compare with Pi 4 + official 27 W USB-C), then rerun
    the four-criterion soak.
+
+   **2026-07-02 verdict: Pi 3 ships.** Rebenchmarked wake +
+   converse end-to-end with a MacBook Pro USB-C brick +
+   USB-C→USB-A adapter + a better micro-USB cable. Throttle
+   stayed at `0x50000` (only "occurred since boot" latches, no
+   currently-active under-voltage) through repeated wake +
+   converse turns. RSS ~267 MB, one core ~55 %, three cores idle,
+   temp peaks 58 °C. Wake fires at scores 0.78–0.98. Full turn
+   latency ~15 s (0.34 s beep + 5 s record + ~10 s cloud round
+   trip + playback). All four gating criteria met. Prototype code:
+   `src/wake_then_converse.py`.
+
+   Session-fixed gotchas worth carrying forward:
+
+   - **PulseAudio hijacked the codec.** The default Raspberry Pi
+     OS install runs `pulseaudio.socket`/`pulseaudio.service` in
+     the user session; PulseAudio holds `/dev/snd/pcmC2D0c` open
+     continuously, which turns each `aplay` cold-open into a
+     ~30 s stall. Mask both units (`systemctl --user mask
+     pulseaudio.socket pulseaudio.service`, then `pkill -9
+     pulseaudio`) so the ALSA-direct path through `plughw:2,0`
+     is unobstructed. After the fix, `wake→beep` dropped from
+     5.28 s to 0.34 s.
+   - **Power delivery is the primary risk.** A random 12 W wall
+     brick + a random micro-USB cable was inadequate. A Xiaomi
+     10000 mAh power bank (rated 5.1 V / 2.4 A) was also
+     inadequate. Working combination for now: MacBook Pro USB-C
+     brick + USB-C→USB-A adapter + a good micro-USB cable. For
+     the parents' final unit, budget a genuine 5.1 V / 3 A
+     USB-C PD wall brick with a China plug and a short thick
+     cable. Absent an inline USB power meter, `vcgencmd
+     get_throttled` at idle is the diagnostic — anything other
+     than `0x0` or `0x50000` means the delivery chain is
+     dropping voltage.
+   - **API-key export lines with trailing comments are
+     fragile.** `~/.bashrc` has
+     `export DASHSCOPE_API_KEY=<key> # comment`. Extracting the
+     value via `grep | cut -d= -f2` grabs the trailing comment
+     along with the key and the cloud rejects it with 401
+     `InvalidApiKey`. Prefer
+     `eval $(grep '^export DASHSCOPE_API_KEY=' ~/.bashrc)` in
+     scripted launches; `bash` correctly discards the comment.
+   - **Mixer levels need explicit persistence.** After
+     `alsactl store 2`: PCM 85 % (~-10 dB), Line DAC 85 %,
+     Line 100 %, HP DAC 0 % (muted) survives reboot. HP muted
+     eliminates any accidental audio to a 3.5 mm jack; all
+     playback goes through the HAT speaker terminals.
 - ⬜ End-of-speech detection for the press-to-talk path (WebRTC VAD
   on-device, or equivalent). Replaces the fixed 5 s window in
   `converse.py`.
@@ -355,7 +402,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-06-20 (second pass — realtime path validated)
+- Last updated: 2026-07-02 (wake + converse end-to-end validated on Pi 3)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that
