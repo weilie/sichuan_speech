@@ -324,17 +324,23 @@ interaction):
      pulseaudio`) so the ALSA-direct path through `plughw:2,0`
      is unobstructed. After the fix, `wake→beep` dropped from
      5.28 s to 0.34 s.
-   - **Power delivery is the primary risk.** A random 12 W wall
-     brick + a random micro-USB cable was inadequate. A Xiaomi
-     10000 mAh power bank (rated 5.1 V / 2.4 A) was also
-     inadequate. Working combination for now: MacBook Pro USB-C
-     brick + USB-C→USB-A adapter + a good micro-USB cable. For
-     the parents' final unit, budget a genuine 5.1 V / 3 A
-     USB-C PD wall brick with a China plug and a short thick
-     cable. Absent an inline USB power meter, `vcgencmd
-     get_throttled` at idle is the diagnostic — anything other
-     than `0x0` or `0x50000` means the delivery chain is
-     dropping voltage.
+   - **Cable dominates power delivery; brick capacity is
+     secondary.** Initial failure was a 12 W wall brick + a
+     random micro-USB cable → `throttled=0x50005` at idle. A
+     Xiaomi 10000 mAh power bank (rated 5.1 V / 2.4 A) with the
+     same cable → also inadequate. Swapping in a better
+     micro-USB cable made a **5 V / 1 A** brick sufficient to
+     run a full wake + converse turn end-to-end, with only brief
+     transient under-voltage blips during the burst (cloud
+     decode + wake-word + speaker output firing at once) that
+     immediately recovered. So the "Pi 3 needs 2.5 A" spec is
+     conservative for this workload — the real sustained draw is
+     ~400 mA idle and ~800 mA – 1 A under load. Guidance for the
+     parents' final unit: budget ≥10 W (5.1 V / 2 A) for
+     headroom, but pair with a short thick cable — a marginal
+     cable defeats any brick. `vcgencmd get_throttled` at idle
+     is the free diagnostic; anything other than `0x0` or
+     `0x50000` means the delivery chain is dropping voltage.
    - **API-key export lines with trailing comments are
      fragile.** `~/.bashrc` has
      `export DASHSCOPE_API_KEY=<key> # comment`. Extracting the
