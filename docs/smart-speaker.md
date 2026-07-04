@@ -408,7 +408,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-07-02 (wake + converse end-to-end validated on Pi 3)
+- Last updated: 2026-07-04 (switched from openWakeWord to sherpa-onnx KWS; Chinese wake word 麻婆豆腐 validated on Pi 3)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that

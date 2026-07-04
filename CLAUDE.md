@@ -24,13 +24,50 @@
 ## Deployment target
 
 Raspberry Pi 3 Model B v1.2 + ReSpeaker 2-Mics Pi HAT V2 + Dayton
-DMA45-4 speaker. Reachable at `weilie@sichuan-pi.local` over LAN.
-Code lives on Pi at `~/sichuan/`. Pi's `~/.asoundrc` routes ALSA
-default to `plughw:2,0` (HAT card). PulseAudio must stay masked
-(session-fixed gotcha — see roadmap).
+DMA45-4 speaker. Code lives on Pi at `~/sichuan/`. Pi's
+`~/.asoundrc` routes ALSA default to `plughw:2,0` (HAT card).
+PulseAudio must stay masked (session-fixed gotcha — see roadmap).
 
 Final deployment: parents' home 1000 km away, so reliability and
 remote-recovery matter more than performance headroom.
+
+## Reaching the Pi
+
+```
+ssh weilie@sichuan-pi.local
+```
+
+Password: `zaq1ZAQ!` (user is on the same LAN; `.local` resolves via
+mDNS). If mDNS ever fails (Pi's IP changed, resolver flake),
+fallback:
+
+```
+arp -a | grep -iE 'b8:27:eb|dc:a6:32|d8:3a:dd'   # Pi MAC OUIs
+```
+
+Typical health check after any downtime:
+
+```
+ssh weilie@sichuan-pi.local "uptime && vcgencmd get_throttled && vcgencmd measure_temp"
+```
+
+Interpretation of `vcgencmd get_throttled`:
+- `0x0` — clean
+- `0x50000` — clean now; under-voltage occurred at boot (expected
+  latch, benign)
+- `0x50005` — active under-voltage right now. Swap cable or PSU
+  before running any load test.
+
+The venv on the Pi is `~/sichuan/.venv/` (activate with
+`source ~/sichuan/.venv/bin/activate`). DASHSCOPE_API_KEY lives in
+`~/.bashrc` with a trailing comment. To load it non-interactively
+(nohup, systemd, etc.):
+
+```
+eval $(grep '^export DASHSCOPE_API_KEY=' ~/.bashrc | tail -1)
+```
+NOT `cut -d= -f2` — that grabs the trailing comment as part of the
+key and DashScope rejects it with 401.
 
 ## Conventions
 
