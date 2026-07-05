@@ -32,7 +32,8 @@ pi_screw_hole = 2.4;   // M2.5 self-tapping into plastic post
 sp_flange     = 48;    // Square flange side
 sp_flange_t   = 3;
 sp_depth      = 25;    // Total driver depth
-sp_screw_pat  = 42;    // Screw pattern (corner-to-corner) — verify!
+sp_screw_pat  = 36;    // Screw pattern (corner-to-corner). Measured
+                       // from actual DMA45-4: 1 5/12" ≈ 36 mm.
 sp_dia_cone   = 42;    // Approximate visible cone diameter for
                        // sizing the grille area
 
