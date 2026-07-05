@@ -21,13 +21,26 @@ pi_mount_dy   = 49;    // Pi mounting-hole spacing along short axis
 pi_mount_edge = 3.5;   // Distance from Pi board corners to hole centres
 pi_screw_hole = 2.4;   // M2.5 self-tapping into plastic post
 
-sp_flange     = 48;    // Dayton DMA45-4 square flange side
-sp_flange_t   = 3;     // Flange thickness
-sp_depth      = 25;    // Total driver depth (flange bottom to magnet)
-sp_cone_dia   = 42;    // Sound-hole diameter through the lid
-sp_screw_dia  = 3.4;   // M3 clearance
-sp_screw_pat  = 42;    // Screw pattern (corner-to-corner spacing);
-                       // adjust after measuring the flange holes
+// Dayton DMA45-4
+sp_flange     = 48;    // Square flange side
+sp_flange_t   = 3;
+sp_depth      = 25;    // Total driver depth
+sp_screw_pat  = 42;    // Screw pattern (corner-to-corner) — verify!
+sp_dia_cone   = 42;    // Approximate visible cone diameter for
+                       // sizing the grille area
+
+// Speaker mounts to the UNDERSIDE of the lid top face via 4 posts
+// that hang down from the interior. Screws come from below (through
+// the flange holes) into pilot holes in the posts.
+post_dia      = 6;     // Post outer diameter
+post_h        = 4;     // Post length hanging down from top face
+post_pilot    = 2.5;   // M3 self-tapping pilot bore
+post_pilot_h  = post_h + 2;  // pilot bore goes into the top face too
+
+// Grille (over the sound-cone area, keeps the driver protected)
+grille_dia         = 44;   // Diameter of the grilled area
+grille_hole_dia    = 2.5;  // Diameter of individual grille holes
+grille_hole_pitch  = 4.0;  // Center-to-center spacing (hex grid)
 
 mic_dia       = 3;
 mic_spacing   = 55;    // Distance between the two HAT mics (approx)
@@ -38,9 +51,20 @@ cable_dia     = 9;     // Micro-USB cable + grommet clearance
 wall_t        = 3;     // Side-wall thickness
 floor_t       = 3;     // Base floor thickness
 lid_top_t     = 3;     // Lid top-face thickness
-fit_slop      = 2.5;   // Extra clearance per side between Pi and wall
-                       // (last print was "a bit tight"; +1 mm over
-                       // the 1.5 mm we had implicitly)
+fit_slop      = 2.5;   // Extra clearance between Pi and wall on +X,
+                       // -X, and +Y (GPIO) sides
+port_clear    = 20;    // Extra clearance on the -Y (port) side so a
+                       // micro-USB plug body can insert into the Pi
+                       // without hitting the wall. This makes the
+                       // interior asymmetric — Pi sits closer to the
+                       // GPIO wall than to the port wall.
+target_square = true;  // If true, pad +Y (GPIO side) to make outer
+                       // footprint square (matches lid dimensions)
+
+// Pi 3B v1.2 micro-USB port location: on the long "bottom" edge,
+// near the left-hand short edge (SD-card side). In Pi-local
+// coordinates (Pi origin at 0, 0), the port center is at X ≈ 10 mm.
+pi_micro_usb_x_in_pi = 10;
 
 // ----- Snap-fit -----
 snap_bump_h   = 1.0;   // How far snap bump protrudes from base wall
@@ -58,10 +82,17 @@ lid_lip_clearance   = 0.3; // Gap between base outer wall and lid inner
 
 // ----- Derived -----
 inner_l = pi_l + 2 * fit_slop;
-inner_w = pi_w + 2 * fit_slop;
+inner_w_min = pi_w + fit_slop + port_clear;
+// If a square outer is requested, pad inner_w up so outer_w == outer_l.
+inner_w = target_square ? max(inner_w_min, inner_l) : inner_w_min;
 base_h  = floor_t + pi_h_stack;
 outer_l = inner_l + 2 * wall_t;
 outer_w = inner_w + 2 * wall_t;
+
+// Pi origin (bottom-left corner of the Pi board) in interior coords
+// (i.e., relative to inside face of the -X and -Y walls).
+pi_x0 = fit_slop;
+pi_y0 = port_clear;
 
 lid_outer_l = outer_l + 2 * lid_wall;
 lid_outer_w = outer_w + 2 * lid_wall;
@@ -80,11 +111,11 @@ module pi_standoff(h = 4) {
 }
 
 module pi_standoffs_group() {
-    // Pi board sits corner-aligned at (fit_slop, fit_slop) relative
-    // to inner cavity. Its mounting holes are pi_mount_edge from each
-    // corner of the board.
-    x0 = fit_slop + pi_mount_edge;
-    y0 = fit_slop + pi_mount_edge;
+    // Pi board sits corner-aligned at (pi_x0, pi_y0) relative to
+    // the inner cavity. Its mounting holes are pi_mount_edge from
+    // each corner of the board.
+    x0 = pi_x0 + pi_mount_edge;
+    y0 = pi_y0 + pi_mount_edge;
     for (x = [x0, x0 + pi_mount_dx],
          y = [y0, y0 + pi_mount_dy])
         translate([x, y, 0]) pi_standoff();
@@ -111,9 +142,13 @@ module base() {
         // Hollow the interior
         translate([wall_t, wall_t, floor_t])
             cube([inner_l, inner_w, base_h]);
-        // Cable grommet hole on the back wall (short wall at +x end)
-        translate([outer_l - wall_t - 0.1, outer_w / 2, floor_t + 10])
-            rotate([0, 90, 0])
+        // Cable grommet hole on the -Y long wall, aligned with the
+        // Pi's micro-USB port position. The cable enters through
+        // this hole; the actual plug lives inside the enclosure and
+        // has port_clear mm of chamber to insert cleanly.
+        cable_world_x = wall_t + pi_x0 + pi_micro_usb_x_in_pi;
+        translate([cable_world_x, wall_t + 0.1, floor_t + 10])
+            rotate([90, 0, 0])
                 cylinder(h = wall_t + 1, d = cable_dia);
     }
     // Pi mounting standoffs on the floor
@@ -123,21 +158,41 @@ module base() {
     snap_bumps_on_base();
 }
 
-module speaker_cutout() {
-    // Round through-hole for the sound cone
-    translate([0, 0, -0.1])
-        cylinder(h = lid_top_t + 0.2, d = sp_cone_dia);
-    // Square flange recess: the flange sits DOWN into a shallow
-    // square pocket from below (interior side of the lid). We recess
-    // the flange from the underside so the top face of the lid stays
-    // flush with the speaker face.
-    translate([-sp_flange / 2, -sp_flange / 2, -0.1])
-        cube([sp_flange, sp_flange, sp_flange_t + 0.1]);
-    // Four screw clearance holes at flange corners (M3)
+module grille_holes() {
+    // Hex-packed round holes covering a disc of diameter grille_dia,
+    // punched through the lid top face (Z=0..lid_top_t).
+    row_dy = grille_hole_pitch * sqrt(3) / 2;
+    r = grille_dia / 2;
+    nr = ceil(r / row_dy) + 1;
+    nc = ceil(r / grille_hole_pitch) + 1;
+    for (row = [-nr : nr]) {
+        y = row * row_dy;
+        x_off = (row % 2 == 0) ? 0 : grille_hole_pitch / 2;
+        for (col = [-nc : nc]) {
+            x = col * grille_hole_pitch + x_off;
+            if (x * x + y * y <= (r - grille_hole_dia / 2) *
+                                 (r - grille_hole_dia / 2))
+                translate([x, y, -0.1])
+                    cylinder(h = lid_top_t + 0.4, d = grille_hole_dia);
+        }
+    }
+}
+
+module speaker_mount_posts() {
+    // Four posts hanging DOWN from the interior of the lid top face,
+    // at the corners of the speaker's screw pattern. Speaker flange
+    // rests against the bottom face of the posts. Screws come from
+    // below through the flange hole up into the post's pilot bore.
+    // Each post is a solid cylinder with a coaxial pilot hole from
+    // its bottom.
     for (dx = [-sp_screw_pat / 2, sp_screw_pat / 2],
          dy = [-sp_screw_pat / 2, sp_screw_pat / 2])
-        translate([dx, dy, -0.1])
-            cylinder(h = lid_top_t + 0.4, d = sp_screw_dia);
+        translate([dx, dy, -post_h])
+            difference() {
+                cylinder(h = post_h, d = post_dia);
+                translate([0, 0, -0.1])
+                    cylinder(h = post_pilot_h + 0.1, d = post_pilot);
+            }
 }
 
 module mic_holes() {
@@ -170,31 +225,39 @@ module lid_snap_recesses() {
 }
 
 module lid() {
-    difference() {
-        // Outer lid shell (bigger than base by 2*lid_wall each axis)
-        cube([lid_outer_l, lid_outer_w, lid_h]);
-        // Lip cavity — receives base's top rim
-        translate([lid_wall - lid_lip_clearance,
-                   lid_wall - lid_lip_clearance,
-                   -0.1])
-            cube([outer_l + 2 * lid_lip_clearance,
-                  outer_w + 2 * lid_lip_clearance,
-                  lid_lip + 0.1]);
-        // Interior chamber above the lip — for speaker back +
-        // room over the HAT
-        translate([lid_wall + wall_t,
-                   lid_wall + wall_t,
-                   lid_lip])
-            cube([inner_l, inner_w, lid_h - lid_lip - lid_top_t]);
-        // Speaker cutout on top face (centered)
+    union() {
+        difference() {
+            // Outer lid shell (bigger than base by 2*lid_wall each axis)
+            cube([lid_outer_l, lid_outer_w, lid_h]);
+            // Lip cavity — receives base's top rim
+            translate([lid_wall - lid_lip_clearance,
+                       lid_wall - lid_lip_clearance,
+                       -0.1])
+                cube([outer_l + 2 * lid_lip_clearance,
+                      outer_w + 2 * lid_lip_clearance,
+                      lid_lip + 0.1]);
+            // Interior chamber above the lip — for speaker back +
+            // room over the HAT
+            translate([lid_wall + wall_t,
+                       lid_wall + wall_t,
+                       lid_lip])
+                cube([inner_l, inner_w, lid_h - lid_lip - lid_top_t]);
+            // Grille holes over the speaker cone area
+            translate([lid_outer_l / 2, lid_outer_w / 2,
+                       lid_h - lid_top_t])
+                grille_holes();
+            // Mic holes on top face
+            translate([lid_wall, lid_wall, lid_h - lid_top_t])
+                mic_holes();
+            // Snap-fit recesses
+            lid_snap_recesses();
+        }
+        // Speaker mounting posts, hanging DOWN from the underside
+        // of the top face. Added as union() so they exist as solid
+        // material inside the interior chamber (opposite of a hole).
         translate([lid_outer_l / 2, lid_outer_w / 2,
                    lid_h - lid_top_t])
-            speaker_cutout();
-        // Mic holes on top face
-        translate([lid_wall, lid_wall, lid_h - lid_top_t])
-            mic_holes();
-        // Snap-fit recesses
-        lid_snap_recesses();
+            speaker_mount_posts();
     }
 }
 
