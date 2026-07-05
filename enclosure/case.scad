@@ -11,13 +11,20 @@
 // print, then refine after test-fit.
 
 // ----- Board & driver dimensions -----
-pi_l          = 85;    // Pi 3B long axis
-pi_w          = 56;    // Pi 3B short axis
+// Pi orientation in the case (long axis VERTICAL):
+//   -X wall  = GPIO edge (long, "left" — nothing external)
+//   +X wall  = port edge (long, "right" — micro-USB, HDMI, audio)
+//   -Y wall  = SD-card edge (short, "bottom")
+//   +Y wall  = USB-stack edge (short, "top" — USB + Ethernet)
+// The Pi sits tight in the -X, -Y, +Y corner. The port edge (+X) is
+// open toward a large chamber for the micro-USB plug + cable.
+pi_l          = 56;    // Pi short axis, along case X
+pi_w          = 85;    // Pi long axis, along case Y
 pi_h_stack    = 34;    // Pi board top-of-tallest-component to floor
                        // + GPIO connector + HAT board thickness.
                        // Give a bit of slack above HAT before lid.
-pi_mount_dx   = 58;    // Pi mounting-hole spacing along long axis
-pi_mount_dy   = 49;    // Pi mounting-hole spacing along short axis
+pi_mount_dx   = 49;    // Mounting-hole spacing along case X (short axis)
+pi_mount_dy   = 58;    // Mounting-hole spacing along case Y (long axis)
 pi_mount_edge = 3.5;   // Distance from Pi board corners to hole centres
 pi_screw_hole = 2.4;   // M2.5 self-tapping into plastic post
 
@@ -51,38 +58,29 @@ cable_dia     = 9;     // Micro-USB cable + grommet clearance
 wall_t        = 3;     // Side-wall thickness
 floor_t       = 3;     // Base floor thickness
 lid_top_t     = 3;     // Lid top-face thickness
-plug_x_clear  = 4.5;   // Clearance between Pi's SD-card short edge
-                       // (-X) and the case wall. Widened from a
-                       // symmetric 2.5 mm because the micro-USB plug
-                       // + cable needs side room on that end.
-usb_x_clear   = 0.5;   // Clearance between Pi's USB-stack short edge
-                       // (+X) and the case wall. Reduced from 2.5 mm
-                       // to donate almost all X slack to the plug
-                       // side; the USB stack is internal-only in our
-                       // build (no external port access needed).
-                       // 0.5 mm is at the edge of what print
-                       // tolerance allows — the v2 base showed the
-                       // print is accurate enough.
-fit_slop      = 2.5;   // Clearance on the +Y (GPIO) side
-port_clear    = 20;    // Extra clearance on the -Y (port) side so a
-                       // micro-USB plug body can insert into the Pi
-                       // without hitting the wall. Makes the
-                       // interior asymmetric — Pi sits closer to the
-                       // GPIO wall than to the port wall.
-target_square = true;  // If true, pad +Y (GPIO side) to make outer
-                       // footprint square (matches lid dimensions)
+// Clearances — Pi is tight against -X, -Y, +Y walls (0.5 mm print
+// tolerance) and open toward +X for the port + cable chamber.
+gpio_x_clear  = 0.5;   // -X wall (LEFT, GPIO edge) — tight
+port_x_clear  = 29.5;  // +X wall (RIGHT, port edge) — big chamber
+                       // for micro-USB plug + cable
+sd_y_clear    = 0.5;   // -Y wall (BOTTOM, SD-card edge) — tight
+usb_y_clear   = 0.5;   // +Y wall (TOP, USB-stack edge) — tight
 
-// Pi 3B v1.2 micro-USB port location: on the long "bottom" edge,
-// near the left-hand short edge (SD-card side). In Pi-local
-// coordinates (Pi origin at 0, 0), the port center is at X ≈ 10 mm.
-pi_micro_usb_x_in_pi = 10;
+// With these values the interior comes out truly square:
+//   inner_l = 56 + 0.5 + 29.5 = 86 mm
+//   inner_w = 85 + 0.5 + 0.5  = 86 mm
+//   outer   = 92 × 92 mm
 
-// Pi 3B v1.2 LEDs (PWR red + ACT green) are on the top surface
-// near the corner between the port long edge and the SD-card short
-// edge. Rough Pi-local center of the two LEDs.
-pi_led_x_in_pi = 11.5;
-pi_led_y_in_pi = 3;
-led_hole_dia  = 5;   // Viewing hole in the lid's top face
+// Pi micro-USB port location: on the +X port edge, 10 mm from the
+// -Y (SD-card) end. Y-coordinate along the port edge, in Pi-local
+// (rotated) coordinates.
+pi_micro_usb_y_in_pi = 10;
+
+// Pi 3B LEDs (PWR + ACT) on the top surface, near the -Y (SD-card)
+// and +X (port) corner. Pi-local coords in the rotated frame.
+pi_led_x_in_pi = 53;   // Near +X port edge (= pi_l - 3)
+pi_led_y_in_pi = 11.5; // Near -Y SD-card edge
+led_hole_dia  = 5;     // Viewing hole in the lid's top face
 
 // ----- Snap-fit -----
 snap_bump_h   = 1.0;   // How far snap bump protrudes from base wall
@@ -99,18 +97,16 @@ lid_lip_clearance   = 0.3; // Gap between base outer wall and lid inner
                            // wall in the lip section
 
 // ----- Derived -----
-inner_l = pi_l + plug_x_clear + usb_x_clear;
-inner_w_min = pi_w + fit_slop + port_clear;
-// If a square outer is requested, pad inner_w up so outer_w == outer_l.
-inner_w = target_square ? max(inner_w_min, inner_l) : inner_w_min;
+inner_l = pi_l + gpio_x_clear + port_x_clear;
+inner_w = pi_w + sd_y_clear + usb_y_clear;
 base_h  = floor_t + pi_h_stack;
 outer_l = inner_l + 2 * wall_t;
 outer_w = inner_w + 2 * wall_t;
 
-// Pi origin (bottom-left corner of the Pi board) in interior coords
-// (i.e., relative to inside face of the -X and -Y walls).
-pi_x0 = plug_x_clear;
-pi_y0 = port_clear;
+// Pi origin (Pi's -X, -Y corner) in interior coords (relative to
+// inside face of the -X and -Y walls). Pi is tight in that corner.
+pi_x0 = gpio_x_clear;
+pi_y0 = sd_y_clear;
 
 lid_outer_l = outer_l + 2 * lid_wall;
 lid_outer_w = outer_w + 2 * lid_wall;
@@ -160,19 +156,19 @@ module base() {
         // Hollow the interior
         translate([wall_t, wall_t, floor_t])
             cube([inner_l, inner_w, base_h]);
-        // Cable grommet hole on the -Y long wall, aligned with the
-        // Pi's micro-USB port position. The cable enters through
-        // this hole; the actual plug lives inside the enclosure and
-        // has port_clear mm of chamber to insert cleanly.
-        cable_world_x = wall_t + pi_x0 + pi_micro_usb_x_in_pi;
-        translate([cable_world_x, wall_t + 0.1, floor_t + 10])
-            rotate([90, 0, 0])
+        // Cable grommet hole on the +X wall (port side), aligned
+        // vertically with the Pi's micro-USB port. The plug inserts
+        // into the Pi from the port_x_clear chamber inside the case
+        // and the cable exits through this grommet.
+        cable_world_y = wall_t + pi_y0 + pi_micro_usb_y_in_pi;
+        translate([outer_l - wall_t - 0.1, cable_world_y, floor_t + 10])
+            rotate([0, 90, 0])
                 cylinder(h = wall_t + 1, d = cable_dia);
     }
     // Pi mounting standoffs on the floor
     translate([wall_t, wall_t, floor_t])
         pi_standoffs_group();
-    // Snap-fit bumps on outer long walls
+    // Snap-fit bumps on outer walls
     snap_bumps_on_base();
 }
 
@@ -214,11 +210,16 @@ module speaker_mount_posts() {
 }
 
 module mic_holes() {
-    // Approximate placement: 55 mm apart, offset toward the back of
-    // the enclosure (where the HAT sits over the Pi's GPIO edge).
-    y = outer_w * 0.7;
-    for (dx = [-mic_spacing / 2, mic_spacing / 2])
-        translate([outer_l / 2 + dx, y, -0.1])
+    // HAT sits above Pi with its long axis along case Y (Pi's long
+    // axis) and its short axis extending inward from the GPIO edge
+    // (case -X). Mics are at the two SHORT ends of the HAT, roughly
+    // above where the HAT's front edge meets the ends.
+    // Positions computed in base-world coords; the caller shifts
+    // by (lid_wall, lid_wall) to place them in lid coords.
+    x = wall_t + pi_x0 + 28;       // ~28 mm inward from GPIO edge
+    y_center = wall_t + pi_y0 + pi_w / 2;  // Pi Y center
+    for (dy = [-mic_spacing / 2, mic_spacing / 2])
+        translate([x, y_center + dy, -0.1])
             cylinder(h = lid_top_t + 0.4, d = mic_dia);
 }
 
