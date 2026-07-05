@@ -51,15 +51,18 @@ cable_dia     = 9;     // Micro-USB cable + grommet clearance
 wall_t        = 3;     // Side-wall thickness
 floor_t       = 3;     // Base floor thickness
 lid_top_t     = 3;     // Lid top-face thickness
-plug_x_clear  = 4.0;   // Clearance between Pi's SD-card short edge
+plug_x_clear  = 4.5;   // Clearance between Pi's SD-card short edge
                        // (-X) and the case wall. Widened from a
                        // symmetric 2.5 mm because the micro-USB plug
                        // + cable needs side room on that end.
-usb_x_clear   = 1.0;   // Clearance between Pi's USB-stack short edge
+usb_x_clear   = 0.5;   // Clearance between Pi's USB-stack short edge
                        // (+X) and the case wall. Reduced from 2.5 mm
-                       // to donate space to the plug side; the USB
-                       // stack is internal-only in our build (no
-                       // external port access needed).
+                       // to donate almost all X slack to the plug
+                       // side; the USB stack is internal-only in our
+                       // build (no external port access needed).
+                       // 0.5 mm is at the edge of what print
+                       // tolerance allows — the v2 base showed the
+                       // print is accurate enough.
 fit_slop      = 2.5;   // Clearance on the +Y (GPIO) side
 port_clear    = 20;    // Extra clearance on the -Y (port) side so a
                        // micro-USB plug body can insert into the Pi
