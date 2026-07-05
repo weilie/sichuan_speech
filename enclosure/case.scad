@@ -51,11 +51,19 @@ cable_dia     = 9;     // Micro-USB cable + grommet clearance
 wall_t        = 3;     // Side-wall thickness
 floor_t       = 3;     // Base floor thickness
 lid_top_t     = 3;     // Lid top-face thickness
-fit_slop      = 2.5;   // Extra clearance between Pi and wall on +X,
-                       // -X, and +Y (GPIO) sides
+plug_x_clear  = 4.0;   // Clearance between Pi's SD-card short edge
+                       // (-X) and the case wall. Widened from a
+                       // symmetric 2.5 mm because the micro-USB plug
+                       // + cable needs side room on that end.
+usb_x_clear   = 1.0;   // Clearance between Pi's USB-stack short edge
+                       // (+X) and the case wall. Reduced from 2.5 mm
+                       // to donate space to the plug side; the USB
+                       // stack is internal-only in our build (no
+                       // external port access needed).
+fit_slop      = 2.5;   // Clearance on the +Y (GPIO) side
 port_clear    = 20;    // Extra clearance on the -Y (port) side so a
                        // micro-USB plug body can insert into the Pi
-                       // without hitting the wall. This makes the
+                       // without hitting the wall. Makes the
                        // interior asymmetric — Pi sits closer to the
                        // GPIO wall than to the port wall.
 target_square = true;  // If true, pad +Y (GPIO side) to make outer
@@ -65,6 +73,13 @@ target_square = true;  // If true, pad +Y (GPIO side) to make outer
 // near the left-hand short edge (SD-card side). In Pi-local
 // coordinates (Pi origin at 0, 0), the port center is at X ≈ 10 mm.
 pi_micro_usb_x_in_pi = 10;
+
+// Pi 3B v1.2 LEDs (PWR red + ACT green) are on the top surface
+// near the corner between the port long edge and the SD-card short
+// edge. Rough Pi-local center of the two LEDs.
+pi_led_x_in_pi = 11.5;
+pi_led_y_in_pi = 3;
+led_hole_dia  = 5;   // Viewing hole in the lid's top face
 
 // ----- Snap-fit -----
 snap_bump_h   = 1.0;   // How far snap bump protrudes from base wall
@@ -81,7 +96,7 @@ lid_lip_clearance   = 0.3; // Gap between base outer wall and lid inner
                            // wall in the lip section
 
 // ----- Derived -----
-inner_l = pi_l + 2 * fit_slop;
+inner_l = pi_l + plug_x_clear + usb_x_clear;
 inner_w_min = pi_w + fit_slop + port_clear;
 // If a square outer is requested, pad inner_w up so outer_w == outer_l.
 inner_w = target_square ? max(inner_w_min, inner_l) : inner_w_min;
@@ -91,7 +106,7 @@ outer_w = inner_w + 2 * wall_t;
 
 // Pi origin (bottom-left corner of the Pi board) in interior coords
 // (i.e., relative to inside face of the -X and -Y walls).
-pi_x0 = fit_slop;
+pi_x0 = plug_x_clear;
 pi_y0 = port_clear;
 
 lid_outer_l = outer_l + 2 * lid_wall;
@@ -204,6 +219,17 @@ module mic_holes() {
             cylinder(h = lid_top_t + 0.4, d = mic_dia);
 }
 
+module led_hole() {
+    // Viewing port for the Pi 3B's PWR + ACT LEDs. Placed in the lid
+    // top face directly above their position on the Pi (using base
+    // world coords + lid_wall offset). The HAT does not cover this
+    // corner of the Pi so the line of sight is clear.
+    x = wall_t + pi_x0 + pi_led_x_in_pi;
+    y = wall_t + pi_y0 + pi_led_y_in_pi;
+    translate([x, y, -0.1])
+        cylinder(h = lid_top_t + 0.4, d = led_hole_dia);
+}
+
 module lid_snap_recesses() {
     // Matching recesses on the lid's inner wall in the lip section.
     // Lip cavity spans z=0 to z=lid_lip. Snap bump at
@@ -249,6 +275,9 @@ module lid() {
             // Mic holes on top face
             translate([lid_wall, lid_wall, lid_h - lid_top_t])
                 mic_holes();
+            // LED viewing hole on top face
+            translate([lid_wall, lid_wall, lid_h - lid_top_t])
+                led_hole();
             // Snap-fit recesses
             lid_snap_recesses();
         }
