@@ -20,9 +20,10 @@
 // open toward a large chamber for the micro-USB plug + cable.
 pi_l          = 56;    // Pi short axis, along case X
 pi_w          = 85;    // Pi long axis, along case Y
-pi_h_stack    = 34;    // Pi board top-of-tallest-component to floor
+pi_h_stack    = 44;    // Pi board top-of-tallest-component to floor
                        // + GPIO connector + HAT board thickness.
                        // Give a bit of slack above HAT before lid.
+                       // Raised +10 mm in v7 for more interior room.
 pi_mount_dx   = 49;    // Mounting-hole spacing along case X (short axis)
 pi_mount_dy   = 58;    // Mounting-hole spacing along case Y (long axis)
 pi_mount_edge = 3.5;   // Distance from Pi board corners to hole centres
