@@ -60,18 +60,14 @@ cable_dia     = 9;     // Micro-USB cable + grommet clearance
 wall_t        = 3;     // Side-wall thickness
 floor_t       = 3;     // Base floor thickness
 lid_top_t     = 3;     // Lid top-face thickness
-// Clearances — Pi is tight against -X, -Y, +Y walls (0.5 mm print
-// tolerance) and open toward +X for the port + cable chamber.
-gpio_x_clear  = 0.5;   // -X wall (LEFT, GPIO edge) — tight
-port_x_clear  = 32.5;  // +X wall (RIGHT, port edge) — big chamber
-                       // for micro-USB plug + cable. Widened from
-                       // 29.5 mm to make the outer base square at
-                       // 95 × 95 mm, with all the extra X space on
-                       // the port/cable side.
-sd_y_clear    = 3.5;   // -Y wall (BOTTOM, SD-card edge). Widened
-                       // from 0.5 mm to accommodate the SD card
-                       // sticking out ~3 mm past the Pi's board edge.
-usb_y_clear   = 0.5;   // +Y wall (TOP, USB-stack edge) — tight
+// Clearances — v10 adds a uniform +2 mm on every side so the Pi
+// doesn't scrape any wall during install.
+gpio_x_clear  = 2.5;   // -X wall (LEFT, GPIO edge)
+port_x_clear  = 34.5;  // +X wall (RIGHT, port edge) — big chamber
+                       // for micro-USB plug + cable
+sd_y_clear    = 5.5;   // -Y wall (BOTTOM, SD-card edge, includes
+                       // ~3 mm for the SD card sticking out)
+usb_y_clear   = 2.5;   // +Y wall (TOP, USB-stack edge)
 
 // With these values the interior comes out truly square:
 //   inner_l = 56 + 0.5 + 29.5 = 86 mm
