@@ -65,7 +65,9 @@ lid_top_t     = 3;     // Lid top-face thickness
 gpio_x_clear  = 0.5;   // -X wall (LEFT, GPIO edge) — tight
 port_x_clear  = 29.5;  // +X wall (RIGHT, port edge) — big chamber
                        // for micro-USB plug + cable
-sd_y_clear    = 0.5;   // -Y wall (BOTTOM, SD-card edge) — tight
+sd_y_clear    = 3.5;   // -Y wall (BOTTOM, SD-card edge). Widened
+                       // from 0.5 mm to accommodate the SD card
+                       // sticking out ~3 mm past the Pi's board edge.
 usb_y_clear   = 0.5;   // +Y wall (TOP, USB-stack edge) — tight
 
 // With these values the interior comes out truly square:
