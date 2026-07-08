@@ -1,9 +1,16 @@
 # Next Session Punch List
 
 Originally captured 2026-07-03 with two work streams: Chinese wake
-word (software) and enclosure (hardware). **Wake word is DONE** as
-of 2026-07-04. Only the enclosure work remains open; wake-word
-section is kept below as historical context.
+word (software) and enclosure (hardware). **Wake word done**
+2026-07-04. Enclosure moved from Snips-STL fit-check into our own
+OpenSCAD design (v1 → v10 shipped between 2026-07-03 and
+2026-07-06). Physical fit-test of v10 print and a handful of
+enclosure sub-features are the last open pieces before the parents'
+build.
+
+Also delivered since first capture: Sichuan system-prompt expansion
+(2026-07-08, commit `e699d43`) — grandchild persona, brevity cap,
+health/finance safety rails.
 
 ## 1. Chinese wake word — DONE 2026-07-04
 
@@ -20,6 +27,11 @@ beep → question → cloud → Sichuan reply) validated on Pi 3 with
 - Code lives in `src/wake_then_converse.py`.
 - Extra deps beyond openWakeWord's stack: `sherpa-onnx`,
   `sentencepiece`, `pypinyin`.
+
+To swap the wake phrase, regenerate pinyin tokens via
+`sherpa_onnx.text2token(...)` and edit `wake_keywords.txt`. Pick
+3-4 syllable phrases with distinct vowels and no retroflex
+(zh/ch/sh drift in Sichuan).
 
 ### Original research context (kept for future revisiting)
 
@@ -74,58 +86,75 @@ glue-scripting, training, deploying.
 - **Baidu / Alibaba / iFlyTek APIs**: cloud-based (adds latency,
   requires internet per wake) or per-device commercial licensing.
 
-## 2. Enclosure
+## 2. Enclosure — v10 rendered, physical fit-test of v10 pending
 
-Current state:
+Design source of truth is `enclosure/case.scad` (OpenSCAD).
+Rendered STLs `enclosure/base.stl` and `enclosure/lid.stl` are
+regenerated from it. Iterations 1 → 10 have converged on:
 
-- **Snips case for RPi3 + ReSpeaker 2-Mics + 3W speaker** downloaded
-  from Cults3D
-  (<https://cults3d.com/en/3d-model/tool/snips-case-for-rpi3-respeaker-2-mics-pi-hat-speaker-3w>)
-- STLs stashed at `enclosure/snips-reference/`:
-  - `boitier.stl` — main enclosure body, holds the Pi (**a print
-    was started on 2026-07-03; test-fit status is what remains open**)
-  - `couvercle.stl` — top lid with speaker chamber
-  - `cache_ethernet.stl`, `cache_usb.stl` — port covers
-- No `.scad` or CAD source available in the download; STLs only
+- **Base outer 99 × 99 × 47 mm** (truly square, walls 3 mm)
+- **Lid outer 103 × 103 × 32 mm** (overhangs base by 2 mm each side)
+- **Pi rotated 90°** inside the case: long axis vertical, GPIO on
+  the LEFT wall, port edge on the RIGHT wall, USB stack TOP, SD
+  card BOTTOM
+- **~2 mm breathing room** between the Pi and each wall on install
+  (was 0.5 mm in v9, was too tight)
+- **Cable grommet on the RIGHT wall**, aligned with the Pi's
+  micro-USB port; big +X chamber for plug + cable slack
+- **Speaker mount posts on the lid interior** at 36 mm corner-to-
+  corner (Dayton DMA45-4 flange holes, measured 1 5/12″)
+- **Grille** on the lid's top face — hex-packed 2.5 mm holes over a
+  44 mm circle above the driver cone
+- **Two 3 mm mic openings** on the lid (approximate positions above
+  the HAT V2 mics — still to be verified in a full assembly)
+- **LED viewing hole** in the lid, 5 mm circle above the Pi's
+  PWR + ACT LED corner (for troubleshooting)
+- **Snap-fit** — bumps on base long walls, matching recesses on lid
+  inner lip. Confirmed to mate cleanly on v1 print.
 
-### Next steps in this order
+Commits `a7123fd` (v1) through `eb870ca` (v10) — see `git log
+enclosure/` for the full iteration history and the rationale for
+each change.
 
-1. **Finish print of `boitier.stl`** and test-fit Pi 3B v1.2:
-   - Do the mounting holes align with the Pi's holes?
-   - Do the USB / HDMI / micro-USB / audio cutouts align?
-   - Note: this case's title says "rpi3" so it should fit Pi 3B, but
-     many similar cases on Thingiverse are actually for Pi 3A+ (the
-     smaller 65×56 mm board). Our Pi 3B v1.2 is 85×56 mm.
-2. **If it fits well**: proceed to design a new OpenSCAD source
-   using the Snips case's geometry as reference. Modifications:
-   - Adapt the speaker chamber to the **Dayton DMA45-4** (~48 mm
-     round, ~25 mm deep). The Snips original targets a small
-     rectangular ~3 W speaker.
-   - Add cable-entry grommet hole and internal cable-clamp boss for
-     the CanaKit 5.1 V / 2.5 A PSU (ordered 2026-07-03, arriving
-     shortly).
-   - Add ventilation slots for the Pi SoC.
-   - Route mic openings to the ReSpeaker HAT V2 mic positions.
-3. **If it doesn't fit**: measure the Pi 3B v1.2 board and mounting
-   hole positions directly, then start OpenSCAD from scratch. The
-   printed boitier isn't wasted: use it as physical reference for
-   the mic-funnel geometry and general form factor.
+### Next steps
 
-### Tools needed for design work
+1. **Print v10 base + lid** and do the fit-check with a Pi 3B v1.2
+   + ReSpeaker HAT V2 + Dayton DMA45-4 + PSU cable. Verify:
+   - Pi drops in with ~2 mm slop on each wall (no scraping).
+   - Micro-USB plug reaches the port through the grommet with cable
+     slack inside.
+   - HAT stacks on GPIO without hitting the lid ceiling.
+   - Speaker mounts to lid interior with 4 × M3 × 10 mm pan-head
+     screws into the plastic posts.
+   - Snap-fit closes cleanly.
+   - LEDs are visible through the lid hole.
+2. **Add still-missing features** to `case.scad`:
+   - **Ventilation slots** in the base side walls (Pi 3B under
+     sustained load has been observed at 58 °C; +10 °C once inside
+     an enclosed box is realistic; slots are cheap insurance).
+   - **Internal cable clamp / strain-relief boss** near the grommet
+     so a tug on the external cable doesn't pull on the Pi's
+     micro-USB connector.
+   - **Mic-opening positions** verified against real HAT V2 mic
+     locations (currently a best-guess based on 55 mm spacing).
+3. **Aesthetics pass** (v11+): colour choice, texture, finish. Not
+   urgent.
+
+### Tools
 
 - OpenSCAD on the Mac: `brew install --cask openscad`
-- Assistant will write `.scad` source; can then invoke `openscad -o
-  file.stl file.scad` headlessly via Bash to render.
+- Render workflow: `openscad -o base.stl -D 'part="base"' case.scad`
+  (same for `"lid"`). Assistant can iterate the `.scad` and render
+  headlessly via the Bash tool.
 - User prints, test-fits, reports gaps, iterate.
 
-### Other open enclosure items (deferred to a later pass)
+### Screws + hardware
 
-- Cable strain relief and internal cable clamp geometry
-- Ferrite bead for mains hum insurance (probably unnecessary but easy
-  insurance)
-- Ventilation slot placement — needs thermal-load measurement
-- Aesthetics: color, texture, finish
-- 3D print farm / service selection if not printing at home
+- **Speaker → lid:** 4 × M3 × 10 mm pan-head Phillips machine
+  screws. Any style with a shaft ≥ 3 mm and length 8–12 mm works.
+- **Power:** CanaKit 5.1 V / 2.5 A micro-USB PSU + short thick
+  cable. (See roadmap for the cable-vs-brick finding — cable
+  quality matters more than brick rating.)
 
 ## 3. Other open items (context, not urgent this session)
 
@@ -134,9 +163,12 @@ Carried over from `docs/smart-speaker.md`:
 - **Rotate the DashScope API key.** Still leaked from 2026-06-20,
   still active. Reset button on Alibaba Model Studio's API Key page.
 - End-of-speech VAD to replace the fixed 5 s recording window in
-  `converse.py` / `wake_then_converse.py`
-- Multi-turn conversation memory within a session
-- Daemon-shape wrapper (systemd, restart, reconnect, log caps)
-- Cost protection (Alibaba console hard caps + on-device usage limits)
-- Remote access (Tailscale) for post-deployment troubleshooting
-- Health alerting / heartbeat
+  `converse.py` / `wake_then_converse.py`. Fun-ASR-Realtime is a
+  candidate for this (dedicated Sichuan accent support, DashScope
+  same-platform integration).
+- Multi-turn conversation memory within a session.
+- Daemon-shape wrapper (systemd, restart, reconnect, log caps).
+- Cost protection (Alibaba console hard caps + on-device usage
+  limits).
+- Remote access (Tailscale) for post-deployment troubleshooting.
+- Health alerting / heartbeat.

@@ -2,9 +2,9 @@
 
 ## Read first
 
-- `docs/next-session.md` — active punch list. Two work streams in flight:
-  Chinese wake word (switching to sherpa-onnx KWS) and enclosure
-  (test-fitting the Snips reference case).
+- `docs/next-session.md` — active punch list. Current focus: enclosure
+  iteration (v10 is latest; physical fit-test of v10 print + adding
+  ventilation / mic openings / strain-relief still open).
 - `docs/smart-speaker.md` — full roadmap, hardware/software constraints
   we've validated, and non-obvious gotchas (PulseAudio, .bashrc
   key-parsing, ALSA mixer persistence, power-cable dominance).
@@ -15,11 +15,14 @@
   qwen3-omni-flash. Working.
 - `src/chat_omni.py` — realtime WebSocket path. Working on Pi 3 + HAT V2.
 - `src/wake_then_converse.py` — Phase 1 wake + converse integration.
-  Uses openWakeWord `hey_jarvis` today; will be refactored to
-  sherpa-onnx KWS with a Chinese wake word (see `docs/next-session.md`).
-- `enclosure/snips-reference/` — STLs from Cults3D for reference only,
-  no editable source. Future OpenSCAD redesign will use these as
-  visual reference.
+  Uses sherpa-onnx KWS with wake phrase 麻婆豆腐 (pinyin-tokenised;
+  keyword file at `~/sichuan/models/wake_keywords.txt` on the Pi).
+- `enclosure/case.scad` — OpenSCAD source of truth for the enclosure.
+  Rendered STLs (`enclosure/base.stl`, `enclosure/lid.stl`) are
+  regenerated from this. Iterate: edit `.scad` → `openscad -o
+  base.stl -D 'part="base"' case.scad` (same for `"lid"`).
+- `enclosure/snips-reference/` — original Cults3D STLs, kept only as
+  historical reference (not used for the current design).
 
 ## Deployment target
 
@@ -77,6 +80,8 @@ key and DashScope rejects it with 401.
 - Roadmap doc `docs/smart-speaker.md` is the source of truth for
   "what we've learned"; `docs/next-session.md` is the source of
   truth for "what we do next."
-- Sichuan-dialect responses are enforced via the system prompt in
-  `src/converse.py` / `src/wake_then_converse.py`. Preserve it if
-  refactoring.
+- The system prompt in `src/converse.py` / `src/wake_then_converse.py`
+  does more than dialect enforcement — it also fixes persona ("filial
+  grandchild talking to elders"), enforces brevity (2-3 sentences),
+  and sets safety rails for medical / health / money topics. Preserve
+  those aspects if refactoring; feel free to iterate on wording.

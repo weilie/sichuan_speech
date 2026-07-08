@@ -257,24 +257,26 @@ Sichuanese persona prompt — all deferred to later phases.
   hardware constraint discovered: the HAT codec does not allow ALSA to
   hold mic input and audio output at the same time, so barge-in is not
   possible on this hardware path. Documented in §5.3.
-- ⏸ Pi 3 → Pi 4/5 decision deferred to Phase 1 once wake-word library
-  is picked and RAM/CPU footprint is known.
+- ✅ Pi 3 → Pi 4/5 decision resolved 2026-07-02: **Pi 3 ships.**
+  Rebenchmarked wake + converse under load, all four gating
+  criteria met. Detail in the Phase 1 block below.
 
 ### Phase 1 — Standalone wake-word device (MVP shipped to parents)
 
 Conversation-shape work (turns the prototype into a usable Alexa-like
 interaction):
-- ⬜ Wake-word library + phrase. **Use openWakeWord** (Apache 2.0
-  code; CC BY-NC-SA on pre-trained models, which is fine for this
-  non-commercial personal device). Rationale: the eventual product
-  wake phrase is a Sichuan-dialect Chinese phrase, which requires
-  a *custom-trained* model. Picovoice Porcupine's free tier lets
-  you train custom models but only deploys them on x86_64 — running
-  a custom Porcupine model on ARM/Pi requires a paid Enterprise
-  plan, which we don't want. openWakeWord's custom training is
-  free and runs anywhere. Phase 1 starts with one of the pre-
-  trained models (e.g., "hey jarvis"); training the actual Chinese
-  phrase is a later Phase 1 task or a Phase 2 polish.
+- ✅ Wake-word library + phrase. **Switched to sherpa-onnx KWS
+  with the pretrained `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-
+  2024-01-01` Chinese pinyin model** on 2026-07-04 (commit
+  `8566def`), replacing an initial openWakeWord + `hey_jarvis`
+  prototype. Rationale: research on 2026-07-03 found no public
+  community-trained Chinese openWakeWord models and the official
+  training pipeline is broken on current Colab, whereas sherpa-onnx
+  ships a working pretrained Chinese KWS model with dialect
+  robustness that plays fine on Pi 3. Wake phrase is 麻婆豆腐,
+  encoded as pinyin tokens in a keywords file; swapping to another
+  Chinese phrase is a one-line change after re-tokenising via
+  `sherpa_onnx.text2token`. Detail in `docs/next-session.md` §1.
 - ⬜ **Pi 3 vs Pi 4 gating benchmark.** With the chosen wake-word
   library running continuously *alongside* `chat_omni.py`, soak
   for ≥30 min on the bench Pi 3 and measure:
@@ -379,7 +381,14 @@ Device-shape work (makes it deployable to parents):
   pre-flashed before transport.
 - ⬜ Health alerting: heartbeat endpoint, daemon posts to it,
   missing-heartbeat alert to maintainer's phone.
-- ⬜ 3D-printed enclosure v1.
+- 🟨 3D-printed enclosure. Design in `enclosure/case.scad` (v10 as
+  of 2026-07-06): 99×99×47 mm square base + 103×103×32 mm lid,
+  snap-fit, Pi rotated 90° for long-axis vertical fit, 36 mm
+  DMA45-4 speaker screw pattern, grille + mic openings + LED
+  viewing hole + cable grommet. **Still open:** physical fit-test
+  of v10 print, and adding ventilation slots / internal cable
+  strain-relief boss / verified mic-opening positions. See
+  `docs/next-session.md` §2.
 - ⬜ Multi-week soak at maintainer's home, including forced Wi-Fi
   outage, unclean shutdown, and cloud-session kill. Verify recovery
   and that health alerts fire.
@@ -399,8 +408,11 @@ Device-shape work (makes it deployable to parents):
 - ⬜ UPS HAT and battery for power-blip tolerance.
 - ⬜ Far-field upgrade (e.g. ReSpeaker 4-Mic Array) if room acoustics
   require it.
-- ⬜ Stronger Sichuanese persona prompt to resist Mandarin drift
-  when the user code-switches.
+- 🟨 Stronger Sichuanese persona prompt. First expansion landed
+  2026-07-08 (commit `e699d43`): grandchild persona, 2-3 sentence
+  brevity cap, health/finance safety rails, list of colloquialisms
+  to sprinkle. Remaining: measure Mandarin drift on real code-
+  switched input from parents and tune further.
 - ⬜ Bot-initiated speech for reminders or notifications.
 
 ---
@@ -408,7 +420,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-07-04 (switched from openWakeWord to sherpa-onnx KWS; Chinese wake word 麻婆豆腐 validated on Pi 3)
+- Last updated: 2026-07-08 (enclosure v10 rendered, system prompt expanded to grandchild persona + brevity + safety rails)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that
