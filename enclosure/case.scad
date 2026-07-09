@@ -29,27 +29,29 @@ pi_mount_dy   = 58;    // Mounting-hole spacing along case Y (long axis)
 pi_mount_edge = 3.5;   // Distance from Pi board corners to hole centres
 pi_screw_hole = 2.4;   // M2.5 self-tapping into plastic post
 
-// Dayton DMA45-4
-sp_flange     = 48;    // Square flange side
-sp_flange_t   = 3;
-sp_depth      = 25;    // Total driver depth
-sp_screw_pat  = 36;    // Screw pattern (corner-to-corner). Measured
-                       // from actual DMA45-4: 1 5/12" ≈ 36 mm.
-sp_dia_cone   = 42;    // Approximate visible cone diameter for
-                       // sizing the grille area
+// Dayton DMA45-4 (values from the official spec sheet:
+// daytonaudio.com/images/resources/295-580--dayton-audio-dma45-4-
+// specification-sheet.pdf).
+sp_flange     = 46;    // Square flange side length
+sp_flange_t   = 3;     // Flange thickness
+sp_depth      = 26.1;  // Total driver depth (flange top → magnet)
+sp_screw_pat  = 36;    // Screw pattern spacing (corner-to-corner)
+sp_baffle_cut = 40;    // Recommended baffle cutout diameter — the
+                       // round driver frame protrudes through this
+                       // hole when front-mounted
+sp_screw_dia  = 3.5;   // M3 clearance through the lid (spec says
+                       // Ø3.3 on the flange; 3.5 gives a bit of
+                       // slop for print tolerance)
 
-// Speaker mounts to the UNDERSIDE of the lid top face via 4 posts
-// that hang down from the interior. Screws come from below (through
-// the flange holes) into pilot holes in the posts.
-post_dia      = 6;     // Post outer diameter
-post_h        = 4;     // Post length hanging down from top face
-post_pilot    = 2.5;   // M3 self-tapping pilot bore
-post_pilot_h  = post_h + 2;  // pilot bore goes into the top face too
-
-// Grille (over the sound-cone area, keeps the driver protected)
-grille_dia         = 44;   // Diameter of the grilled area
-grille_hole_dia    = 2.5;  // Diameter of individual grille holes
-grille_hole_pitch  = 4.0;  // Center-to-center spacing (hex grid)
+// Speaker is FRONT-mounted (v11): driver drops in from above,
+// flange rests on top of the lid, foam gasket compresses against
+// the lid's outer surface for an air-tight seal. 4 × M3 screws
+// come from above, through the flange holes, through clearance
+// holes in the lid, and thread into short bosses on the lid's
+// underside.
+sp_boss_dia   = 7;     // Boss outer diameter on the lid interior
+sp_boss_h     = 5;     // Boss length hanging down from the top face
+sp_boss_pilot = 2.5;   // M3 self-tap pilot bore in each boss
 
 mic_dia       = 3;
 mic_spacing   = 55;    // Distance between the two HAT mics (approx)
@@ -175,40 +177,34 @@ module base() {
     snap_bumps_on_base();
 }
 
-module grille_holes() {
-    // Hex-packed round holes covering a disc of diameter grille_dia,
-    // punched through the lid top face (Z=0..lid_top_t).
-    row_dy = grille_hole_pitch * sqrt(3) / 2;
-    r = grille_dia / 2;
-    nr = ceil(r / row_dy) + 1;
-    nc = ceil(r / grille_hole_pitch) + 1;
-    for (row = [-nr : nr]) {
-        y = row * row_dy;
-        x_off = (row % 2 == 0) ? 0 : grille_hole_pitch / 2;
-        for (col = [-nc : nc]) {
-            x = col * grille_hole_pitch + x_off;
-            if (x * x + y * y <= (r - grille_hole_dia / 2) *
-                                 (r - grille_hole_dia / 2))
-                translate([x, y, -0.1])
-                    cylinder(h = lid_top_t + 0.4, d = grille_hole_dia);
-        }
-    }
-}
-
-module speaker_mount_posts() {
-    // Four posts hanging DOWN from the interior of the lid top face,
-    // at the corners of the speaker's screw pattern. Speaker flange
-    // rests against the bottom face of the posts. Screws come from
-    // below through the flange hole up into the post's pilot bore.
-    // Each post is a solid cylinder with a coaxial pilot hole from
-    // its bottom.
+module speaker_front_mount_cutouts() {
+    // Front-mount cutouts through the lid's top face:
+    //   - one Ø40 mm sound hole for the driver frame to protrude
+    //   - four Ø3.5 mm clearance holes for M3 screws, at the
+    //     36×36 mm screw pattern
+    // Positioned relative to the caller's translate — normally the
+    // center of the lid's top face.
+    translate([0, 0, -0.1])
+        cylinder(h = lid_top_t + 0.4, d = sp_baffle_cut);
     for (dx = [-sp_screw_pat / 2, sp_screw_pat / 2],
          dy = [-sp_screw_pat / 2, sp_screw_pat / 2])
-        translate([dx, dy, -post_h])
+        translate([dx, dy, -0.1])
+            cylinder(h = lid_top_t + 0.4, d = sp_screw_dia);
+}
+
+module speaker_mount_bosses() {
+    // Four short bosses hanging DOWN from the underside of the lid
+    // top face, coaxial with the four screw clearance holes. Each
+    // boss adds plastic for the M3 to self-tap into (the 3 mm top
+    // face alone is marginal for M3 grip). Screws enter from ABOVE
+    // through the flange + top face, then bite into the boss.
+    for (dx = [-sp_screw_pat / 2, sp_screw_pat / 2],
+         dy = [-sp_screw_pat / 2, sp_screw_pat / 2])
+        translate([dx, dy, -sp_boss_h])
             difference() {
-                cylinder(h = post_h, d = post_dia);
+                cylinder(h = sp_boss_h, d = sp_boss_dia);
                 translate([0, 0, -0.1])
-                    cylinder(h = post_pilot_h + 0.1, d = post_pilot);
+                    cylinder(h = sp_boss_h + 0.2, d = sp_boss_pilot);
             }
 }
 
@@ -275,10 +271,12 @@ module lid() {
                        lid_wall + wall_t,
                        lid_lip])
                 cube([inner_l, inner_w, lid_h - lid_lip - lid_top_t]);
-            // Grille holes over the speaker cone area
+            // Speaker front-mount cutouts (Ø40 sound hole + 4 M3
+            // clearance holes at 36×36 pattern), centered on the
+            // lid's top face.
             translate([lid_outer_l / 2, lid_outer_w / 2,
                        lid_h - lid_top_t])
-                grille_holes();
+                speaker_front_mount_cutouts();
             // Mic holes on top face
             translate([lid_wall, lid_wall, lid_h - lid_top_t])
                 mic_holes();
@@ -288,12 +286,13 @@ module lid() {
             // Snap-fit recesses
             lid_snap_recesses();
         }
-        // Speaker mounting posts, hanging DOWN from the underside
-        // of the top face. Added as union() so they exist as solid
-        // material inside the interior chamber (opposite of a hole).
+        // Speaker mounting bosses, hanging DOWN from the underside
+        // of the top face, coaxial with the 4 clearance holes.
+        // Added as union() so they exist as solid material in the
+        // interior chamber.
         translate([lid_outer_l / 2, lid_outer_w / 2,
                    lid_h - lid_top_t])
-            speaker_mount_posts();
+            speaker_mount_bosses();
     }
 }
 
