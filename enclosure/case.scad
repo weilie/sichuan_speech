@@ -39,9 +39,11 @@ sp_screw_pat  = 36;    // Screw pattern spacing (corner-to-corner)
 sp_baffle_cut = 40;    // Recommended baffle cutout diameter — the
                        // round driver frame protrudes through this
                        // hole when front-mounted
-sp_screw_dia  = 3.5;   // M3 clearance through the lid (spec says
-                       // Ø3.3 on the flange; 3.5 gives a bit of
-                       // slop for print tolerance)
+sp_screw_dia  = 3;     // v13: uniform Ø3 mm through lid top AND boss
+                       // pilot. M3 self-taps the full 8 mm depth,
+                       // held by plastic threads at both faces.
+                       // Matches the Ø3 mm mic-hole print behavior
+                       // that already grips M3 snugly.
 
 // Speaker is FRONT-mounted (v11): driver drops in from above,
 // flange rests on top of the lid, foam gasket compresses against
@@ -51,12 +53,17 @@ sp_screw_dia  = 3.5;   // M3 clearance through the lid (spec says
 // underside.
 sp_boss_dia   = 7;     // Boss outer diameter on the lid interior
 sp_boss_h     = 5;     // Boss length hanging down from the top face
-sp_boss_pilot = 2.5;   // M3 self-tap pilot bore in each boss
+sp_boss_pilot = 3;     // v13: matches sp_screw_dia so the whole
+                       // hole through lid+boss is a single Ø3 mm
+                       // bore (no step change). See sp_screw_dia.
 
 mic_dia       = 3;
 mic_spacing   = 55;    // Distance between the two HAT mics (approx)
 
-cable_dia     = 9;     // Micro-USB cable + grommet clearance
+cable_dia     = 12;    // Grommet must clear the CanaKit micro-USB
+                       // plug + strain-relief boot (~11 mm wide),
+                       // NOT just the bare cable. Started at 9 mm
+                       // (v1–v11) but plug wouldn't pass through.
 
 // ----- Enclosure dimensions -----
 wall_t        = 3;     // Side-wall thickness
@@ -169,6 +176,20 @@ module base() {
         translate([outer_l - wall_t - 0.1, cable_world_y, floor_t + 10])
             rotate([0, 90, 0])
                 cylinder(h = wall_t + 1, d = cable_dia);
+        // (v14) LED viewing slit on the -Y wall (next wall clockwise
+        // from the +X grommet wall, viewed from above). Also close to
+        // the LED corner: the Pi's PWR+ACT LEDs sit near the +X/-Y
+        // corner, ~11.5 mm from this wall.
+        // Horizontal rectangle 10 mm wide × 2 mm tall, centered
+        // laterally on the wall, bottom edge 5 mm from the outer
+        // ground (including the floor thickness).
+        led_slit_w = 10;   // X-direction (along the wall length)
+        led_slit_h = 2;    // Z-direction (top down)
+        led_slit_z = 5;    // Bottom edge of slit, from outer ground
+        translate([outer_l / 2 - led_slit_w / 2,
+                   -0.1,
+                   led_slit_z])
+            cube([led_slit_w, wall_t + 0.2, led_slit_h]);
     }
     // Pi mounting standoffs on the floor
     translate([wall_t, wall_t, floor_t])
@@ -280,9 +301,10 @@ module lid() {
             // Mic holes on top face
             translate([lid_wall, lid_wall, lid_h - lid_top_t])
                 mic_holes();
-            // LED viewing hole on top face
-            translate([lid_wall, lid_wall, lid_h - lid_top_t])
-                led_hole();
+            // (v14) LED viewing hole removed from the lid — LEDs are
+            // no longer visible from directly above once the speaker
+            // is mounted. LED viewing is now via a side-wall slit on
+            // the base (+X wall, closest to the Pi's LED corner).
             // Snap-fit recesses
             lid_snap_recesses();
         }
