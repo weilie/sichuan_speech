@@ -162,13 +162,64 @@ Carried over from `docs/smart-speaker.md`:
 
 - **Rotate the DashScope API key.** Still leaked from 2026-06-20,
   still active. Reset button on Alibaba Model Studio's API Key page.
-- End-of-speech VAD to replace the fixed 5 s recording window in
-  `converse.py` / `wake_then_converse.py`. Fun-ASR-Realtime is a
-  candidate for this (dedicated Sichuan accent support, DashScope
-  same-platform integration).
-- Multi-turn conversation memory within a session.
-- Daemon-shape wrapper (systemd, restart, reconnect, log caps).
+- ~~End-of-speech VAD~~ **DONE 2026-07-17.** webrtcvad in
+  `wake_then_converse.py`; see §4 below for the turn/session state
+  machine. Fun-ASR-Realtime is still on the table as an eventual
+  replacement (dedicated Sichuan accent support, DashScope same-
+  platform integration) if webrtcvad accuracy proves inadequate.
+- Multi-turn conversation memory within a session. (Each turn
+  currently sends only the system prompt + current audio — no
+  history yet.)
+- ~~Daemon-shape wrapper (systemd, restart)~~ **DONE 2026-07-19.**
+  Systemd user service + linger + auto-restart. See
+  `docs/deployment.md`. Still open: cleaner network-blip reconnect
+  and log caps.
 - Cost protection (Alibaba console hard caps + on-device usage
   limits).
 - Remote access (Tailscale) for post-deployment troubleshooting.
 - Health alerting / heartbeat.
+
+## 4. Turn-taking + session boundary — DONE 2026-07-17
+
+Landed in `src/wake_then_converse.py`. Uses `webrtcvad` for
+end-of-speech, plus an adaptive session loop that ends only on
+meaningful signal (silence or repeated noise) rather than
+arbitrary caps.
+
+### Per-turn (utterance capture)
+
+- 20 ms VAD frames at 16 kHz (`VAD_AGGRESSIVENESS = 2`).
+- 300 ms pre-speech ring buffer so the onset isn't clipped.
+- Utterance opens after 120 ms of voiced audio.
+- Utterance closes on the FIRST of:
+  - 800 ms of trailing silence, or
+  - 30 s hard cap.
+- Sub-400 ms captures are treated as noise: no cloud call, count
+  as a dead turn.
+
+### Session (multi-turn loop after wake)
+
+- After the wake beep, `converse_session()` loops turn-by-turn.
+- **Silence timeout** (how long to wait for the user to start
+  talking before ending the session):
+  - Turn 1 after wake: **8 s** (user may still be forming the
+    thought after the beep).
+  - Follow-up turns: **6 s** (natural conversational pause).
+  - After a dead turn: **2.5 s** (tighten so noise can't drag
+    the session along).
+- **No max turns, no max wall-clock cap.** A real conversation
+  runs unbounded.
+- **Session ends** on any of:
+  - Silence timeout expires with no speech (normal end), or
+  - 2 consecutive dead turns (noise-only input; ends the
+    session and drops back to wake-word listening).
+- Any successful reply (cloud returned audio) zeros the dead-turn
+  counter and relaxes the silence window back to 6 s.
+
+Net effect: a noisy room burns at most 2 cloud calls before we
+bail out; a real conversation is never artificially truncated.
+
+Tuning knobs (constants at the top of `wake_then_converse.py`):
+`VAD_AGGRESSIVENESS`, `MIN_UTTERANCE_MS`, `START_VOICED_MS`,
+`END_SILENCE_MS`, `MAX_UTTERANCE_S`, the three silence-timeout
+values, and `MAX_CONSECUTIVE_DEAD_TURNS`.

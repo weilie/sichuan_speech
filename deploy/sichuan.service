@@ -1,0 +1,17 @@
+[Unit]
+Description=Sichuan smart-speaker (wake word + converse loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/weilie/sichuan
+EnvironmentFile=/home/weilie/.config/sichuan/env
+ExecStart=/home/weilie/sichuan/.venv/bin/python /home/weilie/sichuan/wake_then_converse.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
