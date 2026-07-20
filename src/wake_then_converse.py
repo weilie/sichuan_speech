@@ -1,8 +1,9 @@
 """End-to-end Phase 1 prototype:
   wake-word listening (sherpa-onnx KWS, Chinese "麻婆豆腐")
   → on detection, close wake mic, play ack tone
-  → open mic, record 5 s, send to qwen3-omni-flash, play response
-  → resume wake word
+  → open mic, VAD-gated recording, send to qwen3-omni-flash, play reply
+  → loop for follow-up turns until silence timeout
+  → resume wake-word listening
 
 Single process. The HAT codec (TLV320AIC3104) is half-duplex; we
 close the input stream before playing the ack tone / response, and
@@ -18,11 +19,13 @@ Prerequisites on Pi:
     extracted at MODEL_DIR (see docs/next-session.md).
   - Custom keywords file at KEYWORDS_FILE with the wake phrase(s)
     encoded as pinyin tokens.
+  - `pip install webrtcvad` for end-of-speech detection.
 """
 import os, sys, time, base64, json, math, struct, wave, subprocess
 import numpy as np
 import pyaudio
 import dashscope
+import webrtcvad
 from sherpa_onnx import KeywordSpotter
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
@@ -36,8 +39,34 @@ WAKE_CHUNK = 1600              # 100 ms @ 16 kHz
 
 CONV_RATE_IN = 16000
 CONV_CHUNK = 1600
-RECORD_SECONDS = 5
 WARMUP_SECS = 3.5
+
+# VAD-gated recording
+VAD_AGGRESSIVENESS = 2                # 0..3 (higher = more aggressive filtering)
+VAD_FRAME_MS = 20                     # webrtcvad accepts 10/20/30 ms frames
+VAD_FRAME_SAMPLES = CONV_RATE_IN * VAD_FRAME_MS // 1000  # 320 samples
+VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * 2                  # int16 mono
+START_VOICED_MS = 120                 # need this much voiced audio to open an utterance
+END_SILENCE_MS = 800                  # this much trailing silence closes an utterance
+MAX_UTTERANCE_S = 30                  # hard cap on a single utterance
+PRE_SPEECH_PAD_MS = 300               # keep a ring buffer so we don't clip the onset
+# A session ends when the user goes silent for these many seconds. The first
+# turn allows more time (user may still be forming the question after the
+# beep). After a dead turn (noise-only, see below), we tighten to a short
+# window so a noisy room can't string us along.
+FIRST_TURN_SILENCE_TIMEOUT_S = 8
+FOLLOWUP_SILENCE_TIMEOUT_S = 6
+POST_DEAD_SILENCE_TIMEOUT_S = 2.5
+
+# Guardrails against perpetual sessions in noisy rooms.
+#   - MIN_UTTERANCE_MS: anything shorter than this is treated as noise and
+#     skips the cloud call entirely (cheap, purely local).
+#   - MAX_CONSECUTIVE_DEAD_TURNS: after N turns in a row that either got
+#     rejected locally or came back with no cloud audio, end the session.
+# A real conversation runs unbounded; a room with just background noise
+# burns at most MAX_CONSECUTIVE_DEAD_TURNS turns before we drop out.
+MIN_UTTERANCE_MS = 400
+MAX_CONSECUTIVE_DEAD_TURNS = 2
 
 VOICE = "Sunny"
 MODEL = "qwen3-omni-flash"
@@ -74,33 +103,73 @@ def make_beep(path, freq=880, secs=0.15):
         w.writeframes(raw)
 
 
-def converse_turn(p, api_key):
-    """Open mic, record one turn, send to cloud, play reply.
-    Returns when done. Reopens mic; caller resumes wake-word loop."""
-    stream = p.open(
-        format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
-        input=True, frames_per_buffer=CONV_CHUNK,
-    )
-    # Codec just closed after wake detection — brief re-warm only
-    t = time.monotonic()
-    while time.monotonic() - t < 0.4:
-        stream.read(CONV_CHUNK, exception_on_overflow=False)
-    # Drain leftover audio from the ack beep
-    while stream.get_read_available() >= CONV_CHUNK:
-        stream.read(CONV_CHUNK, exception_on_overflow=False)
+def record_utterance(stream, vad, silence_timeout_s):
+    """Read 20 ms VAD frames from an already-open input stream until one
+    utterance is captured or silence_timeout_s elapses with no speech.
 
-    print(f"[turn] recording {RECORD_SECONDS} s...", flush=True)
-    frames = []
-    for _ in range(int(CONV_RATE_IN / CONV_CHUNK * RECORD_SECONDS)):
-        frames.append(stream.read(CONV_CHUNK, exception_on_overflow=False))
-    stream.stop_stream(); stream.close()
+    Returns (raw_pcm_bytes, reason):
+      reason == "speech"  → utterance captured, bytes contain int16 mono PCM
+      reason == "timeout" → no speech in silence_timeout_s, bytes is b""
+    """
+    pre_speech_frames = max(1, PRE_SPEECH_PAD_MS // VAD_FRAME_MS)
+    start_voiced_needed = max(1, START_VOICED_MS // VAD_FRAME_MS)
+    end_silence_needed = max(1, END_SILENCE_MS // VAD_FRAME_MS)
+    max_frames = MAX_UTTERANCE_S * 1000 // VAD_FRAME_MS
+    silence_timeout_frames = int(silence_timeout_s * 1000 // VAD_FRAME_MS)
 
+    ring = []                # rolling pre-speech buffer
+    captured = []
+    in_speech = False
+    voiced_run = 0
+    silence_run = 0
+    total_frames = 0
+    leading_silence = 0
+
+    while True:
+        data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+        # pyaudio may hand back a short buffer on shutdown; skip those.
+        if len(data) != VAD_FRAME_BYTES:
+            continue
+        is_speech = vad.is_speech(data, CONV_RATE_IN)
+
+        if not in_speech:
+            ring.append(data)
+            if len(ring) > pre_speech_frames:
+                ring.pop(0)
+            if is_speech:
+                voiced_run += 1
+                if voiced_run >= start_voiced_needed:
+                    in_speech = True
+                    captured.extend(ring); ring = []
+                    silence_run = 0
+                    total_frames = len(captured)
+            else:
+                voiced_run = 0
+                leading_silence += 1
+                if leading_silence >= silence_timeout_frames:
+                    return b"", "timeout"
+        else:
+            captured.append(data)
+            total_frames += 1
+            if is_speech:
+                silence_run = 0
+            else:
+                silence_run += 1
+                if silence_run >= end_silence_needed:
+                    return b"".join(captured), "speech"
+            if total_frames >= max_frames:
+                return b"".join(captured), "speech"
+
+
+def cloud_reply(audio_bytes, api_key):
+    """Send one utterance to qwen3-omni-flash and play the audio reply.
+    Returns True on success, False on cloud error / no audio."""
     with wave.open(RECORDING_WAV, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(CONV_RATE_IN)
-        w.writeframes(b"".join(frames))
-
+        w.writeframes(audio_bytes)
     with open(RECORDING_WAV, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+
     print("[turn] sending to cloud...", flush=True)
     t0 = time.monotonic()
     responses = dashscope.MultiModalConversation.call(
@@ -120,6 +189,7 @@ def converse_turn(p, api_key):
         status = j.get("status_code")
         if status and status != 200:
             print(f"[turn] cloud error: {status} {j.get('code')}: {j.get('message')}", flush=True)
+            return False
         for ch in (j.get("output") or {}).get("choices", []) or []:
             for c in ch.get("message", {}).get("content", []):
                 if not isinstance(c, dict): continue
@@ -131,16 +201,74 @@ def converse_turn(p, api_key):
     print("[turn] reply:", "".join(text_parts), flush=True)
     if not audio_chunks:
         print("[turn] no audio in response.", flush=True)
-        return
-    audio_bytes = b"".join(base64.b64decode(p_) for p_ in audio_chunks)
-    if audio_bytes[:4] == b"RIFF":
+        return False
+    reply_bytes = b"".join(base64.b64decode(p_) for p_ in audio_chunks)
+    if reply_bytes[:4] == b"RIFF":
         with open(RESPONSE_WAV, "wb") as f:
-            f.write(audio_bytes)
+            f.write(reply_bytes)
     else:
         with wave.open(RESPONSE_WAV, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
-            w.writeframes(audio_bytes)
+            w.writeframes(reply_bytes)
     play_wav(RESPONSE_WAV)
+    return True
+
+
+def converse_session(p, api_key):
+    """Multi-turn session. Listens after each reply and continues as long as
+    the user keeps producing real speech. Ends on natural silence, or after
+    MAX_CONSECUTIVE_DEAD_TURNS turns of noise-only input. Returns when the
+    session ends; caller resumes wake-word listening."""
+    vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+    turn = 0
+    dead_turns = 0
+    while True:
+        turn += 1
+        stream = p.open(
+            format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
+            input=True, frames_per_buffer=VAD_FRAME_SAMPLES,
+        )
+        # Half-duplex codec just closed after playback / wake — brief re-warm.
+        t = time.monotonic()
+        while time.monotonic() - t < 0.4:
+            stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+        # Drain any residual audio from the ack beep or the previous reply.
+        while stream.get_read_available() >= VAD_FRAME_SAMPLES:
+            stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+
+        if dead_turns > 0:
+            timeout = POST_DEAD_SILENCE_TIMEOUT_S
+        elif turn == 1:
+            timeout = FIRST_TURN_SILENCE_TIMEOUT_S
+        else:
+            timeout = FOLLOWUP_SILENCE_TIMEOUT_S
+        print(f"[turn {turn}] listening (VAD; silence timeout {timeout}s)...", flush=True)
+        audio_bytes, reason = record_utterance(stream, vad, timeout)
+        stream.stop_stream(); stream.close()
+
+        if reason == "timeout":
+            print(f"[turn {turn}] silence — ending session.", flush=True)
+            return
+
+        utt_ms = len(audio_bytes) * 1000 // (CONV_RATE_IN * 2)
+        if utt_ms < MIN_UTTERANCE_MS:
+            dead_turns += 1
+            print(f"[turn {turn}] {utt_ms}ms — too short, treating as noise (dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
+            if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
+                print(f"[session] {dead_turns} consecutive dead turns — ending.", flush=True)
+                return
+            continue
+
+        print(f"[turn {turn}] captured {utt_ms/1000:.1f}s of speech.", flush=True)
+        ok = cloud_reply(audio_bytes, api_key)
+        if ok:
+            dead_turns = 0
+        else:
+            dead_turns += 1
+            print(f"[turn {turn}] cloud returned no audio (dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
+            if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
+                print(f"[session] {dead_turns} consecutive dead turns — ending.", flush=True)
+                return
 
 
 def build_kws():
@@ -208,12 +336,12 @@ def main():
                     frames_w = 0; peak_rms_w = 0
                     last_stats = time.monotonic()
                 if result:
-                    print(f"\n*** WAKE detected ({result!r}) — opening turn ***", flush=True)
+                    print(f"\n*** WAKE detected ({result!r}) — opening session ***", flush=True)
                     # Free codec for the conversation
                     wake_stream.stop_stream(); wake_stream.close(); wake_stream = None
                     play_wav("/tmp/ack.wav")
-                    converse_turn(p, api_key)
-                    print("[turn] done. resuming wake-word listening.\n", flush=True)
+                    converse_session(p, api_key)
+                    print("[session] done. resuming wake-word listening.\n", flush=True)
                     break
         except KeyboardInterrupt:
             print("\n[exit] Ctrl+C", flush=True)
