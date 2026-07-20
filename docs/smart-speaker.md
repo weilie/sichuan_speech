@@ -356,17 +356,36 @@ interaction):
      Line 100 %, HP DAC 0 % (muted) survives reboot. HP muted
      eliminates any accidental audio to a 3.5 mm jack; all
      playback goes through the HAT speaker terminals.
-- ⬜ End-of-speech detection for the press-to-talk path (WebRTC VAD
-  on-device, or equivalent). Replaces the fixed 5 s window in
-  `converse.py`.
+- ✅ End-of-speech detection for the press-to-talk path (WebRTC VAD
+  on-device). Replaces the fixed 5 s window in `wake_then_converse.py`.
+  Landed 2026-07-17. Turn-taking + session-boundary logic:
+  - **Utterance:** 20 ms VAD frames, 300 ms pre-speech ring buffer,
+    120 ms voiced-onset threshold, 800 ms trailing-silence close,
+    30 s hard cap per utterance.
+  - **Session:** after wake beep, keep listening for follow-ups
+    with no arbitrary turn or wall-clock cap. Silence timeout is
+    adaptive — 8 s on turn 1, 6 s on follow-ups, 2.5 s after a
+    dead turn.
+  - **Noise guardrail:** a "dead turn" is any turn where the
+    capture was < 400 ms (local reject, no cloud call) or the
+    cloud returned no audio. Two consecutive dead turns end the
+    session. Any successful reply zeros the counter and relaxes
+    the silence window. Effect: real conversations run unbounded;
+    a noisy room burns at most 2 cloud calls.
+  - Only applies to the press-to-talk (`wake_then_converse.py`)
+    path. Realtime path gets end-of-speech from server-side VAD.
 - ⬜ Multi-turn conversation memory within a session. Both paths.
+  (Currently every turn sends only the system prompt + current
+  audio; no history is passed between turns.)
 - ⬜ Decide which transport (or both) ships in v1. Realtime gives
   ~1–2 s lower time-to-first-audio and free server-side VAD, at the
   cost of a fragile WebSocket lifecycle and the codec hand-off
   complexity. Press-to-talk is simpler but needs client-side VAD
   for end-of-speech detection.
-- ⬜ Daemon shape: wake → record/stream → reply → follow-up window →
-  idle. Clean reconnect on network blips.
+- ✅ Daemon shape: wake → record/stream → reply → follow-up window →
+  idle. Follow-up window landed 2026-07-17; systemd user service
+  with auto-restart landed 2026-07-19. See `docs/deployment.md`.
+  Still open: cleaner reconnect on network blips and log caps.
 
 Device-shape work (makes it deployable to parents):
 - ⬜ Record audio cues and ship as WAV assets.
@@ -420,7 +439,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-07-08 (enclosure v10 rendered, system prompt expanded to grandchild persona + brevity + safety rails)
+- Last updated: 2026-07-19 (systemd user service for auto-start + auto-restart landed; enclosure v14: uniform Ø3 mm speaker mounts, Ø12 mm cable grommet, LED viewing slit on -Y wall)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that
