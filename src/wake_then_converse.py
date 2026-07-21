@@ -42,7 +42,9 @@ CONV_CHUNK = 1600
 WARMUP_SECS = 3.5
 
 # VAD-gated recording
-VAD_AGGRESSIVENESS = 2                # 0..3 (higher = more aggressive filtering)
+VAD_AGGRESSIVENESS = 3                # 0..3 (higher = more aggressive filtering).
+                                      # 3 rejects more marginal audio so faint
+                                      # bleed / echo doesn't open a fake turn.
 VAD_FRAME_MS = 20                     # webrtcvad accepts 10/20/30 ms frames
 VAD_FRAME_SAMPLES = CONV_RATE_IN * VAD_FRAME_MS // 1000  # 320 samples
 VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * 2                  # int16 mono
@@ -172,31 +174,41 @@ def cloud_reply(audio_bytes, api_key):
 
     print("[turn] sending to cloud...", flush=True)
     t0 = time.monotonic()
-    responses = dashscope.MultiModalConversation.call(
-        api_key=api_key, model=MODEL,
-        messages=[
-            {"role": "system", "content": [{"text": SICHUAN_SYSTEM_PROMPT}]},
-            {"role": "user", "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]},
-        ],
-        modalities=["text", "audio"],
-        audio={"voice": VOICE, "format": "wav"},
-        result_format="message", stream=True,
-    )
+    # Wrap the entire cloud call + stream iteration. Transient DNS /
+    # socket / TLS errors (Pi 3 Wi-Fi is flaky) would otherwise raise
+    # out of the streaming iterator and take the daemon down. Treat
+    # any failure here as a "dead turn" — session.py counts it and
+    # ends the session after MAX_CONSECUTIVE_DEAD_TURNS.
     audio_chunks = []
     text_parts = []
-    for resp in responses:
-        j = json.loads(str(resp))
-        status = j.get("status_code")
-        if status and status != 200:
-            print(f"[turn] cloud error: {status} {j.get('code')}: {j.get('message')}", flush=True)
-            return False
-        for ch in (j.get("output") or {}).get("choices", []) or []:
-            for c in ch.get("message", {}).get("content", []):
-                if not isinstance(c, dict): continue
-                if c.get("text"): text_parts.append(c["text"])
-                au = c.get("audio")
-                if isinstance(au, dict) and au.get("data"):
-                    audio_chunks.append(au["data"])
+    try:
+        responses = dashscope.MultiModalConversation.call(
+            api_key=api_key, model=MODEL,
+            messages=[
+                {"role": "system", "content": [{"text": SICHUAN_SYSTEM_PROMPT}]},
+                {"role": "user", "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]},
+            ],
+            modalities=["text", "audio"],
+            audio={"voice": VOICE, "format": "wav"},
+            result_format="message", stream=True,
+        )
+        for resp in responses:
+            j = json.loads(str(resp))
+            status = j.get("status_code")
+            if status and status != 200:
+                print(f"[turn] cloud error: {status} {j.get('code')}: {j.get('message')}", flush=True)
+                return False
+            for ch in (j.get("output") or {}).get("choices", []) or []:
+                for c in ch.get("message", {}).get("content", []):
+                    if not isinstance(c, dict): continue
+                    if c.get("text"): text_parts.append(c["text"])
+                    au = c.get("audio")
+                    if isinstance(au, dict) and au.get("data"):
+                        audio_chunks.append(au["data"])
+    except Exception as e:
+        print(f"[turn] cloud request failed after {time.monotonic()-t0:.1f}s: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return False
     print(f"[turn] cloud round-trip {time.monotonic()-t0:.1f} s.", flush=True)
     print("[turn] reply:", "".join(text_parts), flush=True)
     if not audio_chunks:
@@ -228,11 +240,15 @@ def converse_session(p, api_key):
             format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
             input=True, frames_per_buffer=VAD_FRAME_SAMPLES,
         )
-        # Half-duplex codec just closed after playback / wake — brief re-warm.
+        # Discard the first N seconds after opening the mic. aplay can
+        # return before the codec buffer is fully drained, so speaker
+        # audio may still be emitting for a moment; plus room echo of
+        # the reply lingers a bit. 2 s covers both without cutting into
+        # real user response time (silence timeout starts after this).
         t = time.monotonic()
-        while time.monotonic() - t < 0.4:
+        while time.monotonic() - t < 2.0:
             stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
-        # Drain any residual audio from the ack beep or the previous reply.
+        # Drain anything still queued after the warmup window.
         while stream.get_read_available() >= VAD_FRAME_SAMPLES:
             stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
 
