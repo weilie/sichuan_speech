@@ -68,6 +68,11 @@ POST_DEAD_SILENCE_TIMEOUT_S = 2.5
 # A real conversation runs unbounded; a room with just background noise
 # burns at most MAX_CONSECUTIVE_DEAD_TURNS turns before we drop out.
 MIN_UTTERANCE_MS = 400
+# How many previous exchanges to replay to the model so a session feels
+# like one conversation instead of N unrelated questions. Each retained
+# user turn re-uploads its base64 WAV (~40 KB per second of speech), so
+# this trades upload time on the Pi's Wi-Fi against context depth.
+MAX_HISTORY_TURNS = 3
 MAX_CONSECUTIVE_DEAD_TURNS = 2
 
 VOICE = "Sunny"
@@ -85,6 +90,10 @@ SICHUAN_SYSTEM_PROMPT = (
     "家里人或者医生商量，不要自己给判断。"
     "6. 万一听不清对方说的啥子，就温和地请他们再讲一遍，"
     "不要瞎猜。"
+    "7. 你没得联网查东西的本事，晓不得今天的天气、日期、时间、"
+    "新闻、股价这些实时消息。碰到这类问题就老实说“我这儿查不到”，"
+    "喊他们看手机或者问屋头的人。绝对不准编个数字（比如温度、"
+    "价钱）说得像真的一样。"
 )
 RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
@@ -163,7 +172,7 @@ def record_utterance(stream, vad, silence_timeout_s):
                 return b"".join(captured), "speech"
 
 
-def cloud_reply(audio_bytes, api_key):
+def cloud_reply(audio_bytes, api_key, history):
     """Send one utterance to qwen3-omni-flash and play the audio reply.
     Returns True on success, False on cloud error / no audio."""
     with wave.open(RECORDING_WAV, "wb") as w:
@@ -172,6 +181,8 @@ def cloud_reply(audio_bytes, api_key):
     with open(RECORDING_WAV, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+    user_msg = {"role": "user",
+                "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]}
     print("[turn] sending to cloud...", flush=True)
     t0 = time.monotonic()
     # Wrap the entire cloud call + stream iteration. Transient DNS /
@@ -184,10 +195,11 @@ def cloud_reply(audio_bytes, api_key):
     try:
         responses = dashscope.MultiModalConversation.call(
             api_key=api_key, model=MODEL,
-            messages=[
-                {"role": "system", "content": [{"text": SICHUAN_SYSTEM_PROMPT}]},
-                {"role": "user", "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]},
-            ],
+            messages=(
+                [{"role": "system", "content": [{"text": SICHUAN_SYSTEM_PROMPT}]}]
+                + history
+                + [user_msg]
+            ),
             modalities=["text", "audio"],
             audio={"voice": VOICE, "format": "wav"},
             result_format="message", stream=True,
@@ -223,6 +235,12 @@ def cloud_reply(audio_bytes, api_key):
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
             w.writeframes(reply_bytes)
     play_wav(RESPONSE_WAV)
+    # Only successful turns join the history: a failed call must not
+    # leave a dangling user turn with no assistant answer after it.
+    history.append(user_msg)
+    history.append({"role": "assistant",
+                    "content": [{"text": "".join(text_parts)}]})
+    del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
     return True
 
 
@@ -232,6 +250,8 @@ def converse_session(p, api_key):
     MAX_CONSECUTIVE_DEAD_TURNS turns of noise-only input. Returns when the
     session ends; caller resumes wake-word listening."""
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+    # Fresh history per session: a new wake word starts a new conversation.
+    history = []
     turn = 0
     dead_turns = 0
     while True:
@@ -276,7 +296,7 @@ def converse_session(p, api_key):
             continue
 
         print(f"[turn {turn}] captured {utt_ms/1000:.1f}s of speech.", flush=True)
-        ok = cloud_reply(audio_bytes, api_key)
+        ok = cloud_reply(audio_bytes, api_key, history)
         if ok:
             dead_turns = 0
         else:
