@@ -132,12 +132,18 @@ MIN_UTTERANCE_MS = 400
 # quiet and VAD_AGGRESSIVENESS had to come down to 2 for real speech to survive
 # -- and both are logged on every turn so they can be tuned from field logs
 # rather than guessed at again.
-# Tightened 240/0.25 -> 300/0.35 on 2026-09-19: a keyboard turn measured
-# 240 ms / 27% and slipped through, while the same session's real speech
-# measured 360-800 ms / 41-46%. Calibrated against VAD_AGGRESSIVENESS = 2 --
-# changing that changes these, since a laxer VAD marks typing voiced too.
+# The longest unbroken voiced run is the real discriminator, and it is the one
+# that is duration-independent: a keystroke is a 20-40 ms impulse no matter how
+# long the capture around it runs. 300 ms blocks the keyboard turn that got
+# through on 2026-09-19 (it measured 240 ms) and passes real speech comfortably.
 MIN_VOICED_RUN_MS = 300
-MIN_VOICED_RATIO = 0.35
+# The ratio is only a backstop against a long capture that got one lucky run.
+# It was 0.35 for an hour and that was a mistake: the ratio falls as the capture
+# gets LONGER, so a 7 s capture holding a perfectly good 1.5 s question scores
+# 21% and was thrown away unheard -- measured doing exactly that against the
+# 2026-09-19 question corpus. Judging speech by a number that shrinks the longer
+# the recorder runs is unsound; keep this loose and let the run length decide.
+MIN_VOICED_RATIO = 0.10
 # How many previous exchanges to replay to the model so a session feels
 # like one conversation instead of N unrelated questions. Each retained
 # user turn re-uploads its base64 WAV (~40 KB per second of speech), so

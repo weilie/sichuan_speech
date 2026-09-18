@@ -117,8 +117,14 @@ def main():
     ap.add_argument("--phrase", required=True,
                     help="the phrase spoken after each beep, for scoring completeness")
     ap.add_argument("--negatives")
-    ap.add_argument("--window", type=float, default=5.0,
-                    help="seconds after a beep in which that utterance must start")
+    ap.add_argument("--window", type=float, default=6.0,
+                    help="seconds after a beep that belong to that utterance")
+    ap.add_argument("--beep-guard", type=float, default=0.5,
+                    help="ignore captures that are only the beep itself. The "
+                         "corpus records the beep; the device never hears it, "
+                         "because the mic opens after playback and discards "
+                         "2 s. Without this the beep IS the first capture in "
+                         "every window and the real utterance looks missed.")
     ap.add_argument("--aggressiveness", default="2",
                     help="comma-separated VAD levels to try")
     ap.add_argument("--end-silence", default="800,1400,2000",
@@ -136,21 +142,27 @@ def main():
     print(f"{'agg':>3} {'end_ms':>7} {'recall':>9} {'complete':>10} {'false':>6}  missed")
     for agg in [int(x) for x in a.aggressiveness.split(",")]:
         for end_ms in [int(x) for x in a.end_silence.split(",")]:
-            caps = captures(a.positives, agg, end_ms)
+            caps = [c for c in captures(a.positives, agg, end_ms)
+                    if not c["gated"]]
             hit, complete, missed = 0, 0, []
             for i, m in enumerate(marks, 1):
-                c = next((c for c in caps if m <= c["start_s"] <= m + a.window
-                          and not c["gated"]), None)
-                if c is None:
+                # Overlap, not start-inside: a capture that merged this
+                # utterance with the previous one still carries the audio.
+                ov = [c for c in caps if c["end_s"] > m + a.beep_guard
+                      and c["start_s"] < m + a.window]
+                if not ov:
                     missed.append(i)
                     continue
                 hit += 1
                 if a.no_asr:
                     continue
-                k = (round(c["start_s"], 2), round(c["end_s"], 2))
-                if k not in seen:
-                    seen[k] = transcribe(c["audio"], api_key)
-                if a.phrase in seen[k].replace(" ", ""):
+                heard = ""
+                for c in ov:
+                    k = (round(c["start_s"], 2), round(c["end_s"], 2))
+                    if k not in seen:
+                        seen[k] = transcribe(c["audio"], api_key)
+                    heard += seen[k]
+                if a.phrase in heard.replace(" ", ""):
                     complete += 1
             nfalse = (len([c for c in captures(a.negatives, agg, end_ms)
                            if not c["gated"]]) if a.negatives else -1)
