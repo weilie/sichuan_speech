@@ -179,8 +179,9 @@ Carried over from `docs/smart-speaker.md`:
   in real use.
 - ~~Daemon-shape wrapper (systemd, restart)~~ **DONE 2026-07-19.**
   Systemd user service + linger + auto-restart. See
-  `docs/deployment.md`. Still open: cleaner network-blip reconnect
-  and log caps.
+  `docs/deployment.md`. ~~Log caps~~ **DONE 2026-09-19** (see
+  "Journal is persistent" in `docs/deployment.md`). Still open:
+  cleaner network-blip reconnect.
 - **Residual findings from the 2026-09-19 adversarial review** (the
   five serious ones are fixed in `src/wake_then_converse.py`; these
   three were left):

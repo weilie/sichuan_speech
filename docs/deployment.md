@@ -80,6 +80,39 @@ journalctl --user -u sichuan.service -f       # live logs
 journalctl --user -u sichuan.service --since '10 min ago' --no-pager
 ```
 
+## Journal is persistent (changed 2026-09-19)
+
+Raspberry Pi OS ships `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf`
+with `Storage=volatile` to spare the SD card, so the whole journal
+lived in `/run/log/journal` (tmpfs) and was erased by every reboot —
+i.e. the one event most worth investigating destroyed its own
+evidence. `/var/log/journal` existed but stayed empty, which is why
+`journalctl --user -u sichuan.service` reported "No journal files
+were found".
+
+Overridden by `/etc/systemd/journald.conf.d/50-persistent.conf`
+(on the Pi, not in this repo):
+
+```
+[Journal]
+Storage=persistent
+SystemMaxUse=50M
+SystemMaxFileSize=10M
+```
+
+Apply with `sudo systemctl restart systemd-journald && sudo journalctl --flush`.
+The caps bound SD-card wear — this service logs a few lines per
+turn, not a stream. `weilie` is in the `adm` group, so both of these
+work without sudo:
+
+```
+journalctl --user -u sichuan.service -n 50     # the service's own output
+journalctl -b -1 -n 200                        # the PREVIOUS boot, now retained
+```
+
+If this Pi is ever reimaged, re-apply the drop-in: without it every
+remote diagnosis starts from zero.
+
 ## Non-obvious gotchas
 
 - **User service, not system service.** Under `~/.config/systemd/user/`,
