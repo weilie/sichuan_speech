@@ -89,7 +89,19 @@ VAD_FRAME_MS = 20                     # webrtcvad accepts 10/20/30 ms frames
 VAD_FRAME_SAMPLES = CONV_RATE_IN * VAD_FRAME_MS // 1000  # 320 samples
 VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * 2                  # int16 mono
 START_VOICED_MS = 120                 # need this much voiced audio to open an utterance
-END_SILENCE_MS = 800                  # this much trailing silence closes an utterance
+END_SILENCE_MS = 1400                 # this much trailing silence closes an utterance
+                                      # 800 -> 1400 on 2026-09-19. At 800 a real
+                                      # question was cut after ~300 ms: the
+                                      # captures were 1.4-2.4 s, which after
+                                      # subtracting pre-roll and trailing
+                                      # silence is a fragment, and the cloud
+                                      # answered "I can't hear you" to all of
+                                      # them. On a quiet mic webrtcvad drops
+                                      # frames mid-sentence, and 800 ms of those
+                                      # dropouts is an ordinary pause between
+                                      # words, not the end of a thought. Costs
+                                      # 600 ms of latency on every turn; elderly
+                                      # speakers pause more, not less.
 MAX_UTTERANCE_S = 30                  # hard cap on a single utterance
 PRE_SPEECH_PAD_MS = 300               # keep a ring buffer so we don't clip the onset
 # A session ends when the user goes silent for these many seconds. The first
@@ -120,8 +132,12 @@ MIN_UTTERANCE_MS = 400
 # quiet and VAD_AGGRESSIVENESS had to come down to 2 for real speech to survive
 # -- and both are logged on every turn so they can be tuned from field logs
 # rather than guessed at again.
-MIN_VOICED_RUN_MS = 240
-MIN_VOICED_RATIO = 0.25
+# Tightened 240/0.25 -> 300/0.35 on 2026-09-19: a keyboard turn measured
+# 240 ms / 27% and slipped through, while the same session's real speech
+# measured 360-800 ms / 41-46%. Calibrated against VAD_AGGRESSIVENESS = 2 --
+# changing that changes these, since a laxer VAD marks typing voiced too.
+MIN_VOICED_RUN_MS = 300
+MIN_VOICED_RATIO = 0.35
 # How many previous exchanges to replay to the model so a session feels
 # like one conversation instead of N unrelated questions. Each retained
 # user turn re-uploads its base64 WAV (~40 KB per second of speech), so
@@ -307,9 +323,30 @@ def make_beep(path, freq=880, secs=0.15):
         w.writeframes(raw)
 
 
+def stream_frames(stream):
+    """20 ms frames off a live pyaudio input stream, forever."""
+    while True:
+        data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+        # pyaudio may hand back a short buffer on shutdown; skip those.
+        if len(data) != VAD_FRAME_BYTES:
+            continue
+        yield data
+
+
 def record_utterance(stream, vad, silence_timeout_s):
-    """Read 20 ms VAD frames from an already-open input stream until one
-    utterance is captured or silence_timeout_s elapses with no speech.
+    """Capture one utterance from a live input stream. Thin wrapper so the
+    device and tools/sweep_vad.py share one endpointer -- a sweep against a
+    reimplementation measures the reimplementation."""
+    return endpoint(stream_frames(stream), vad, silence_timeout_s)
+
+
+def endpoint(frames, vad, silence_timeout_s,
+             end_silence_ms=None, start_voiced_ms=None, pre_pad_ms=None):
+    """Consume 20 ms frames until one utterance is captured or
+    silence_timeout_s elapses with no speech.
+
+    The timing parameters default to the module constants; the sweep overrides
+    them to measure settings other than the shipped ones.
 
     Returns (raw_pcm_bytes, reason, stats):
       reason == "speech"  → utterance captured, bytes contain int16 mono PCM
@@ -317,9 +354,12 @@ def record_utterance(stream, vad, silence_timeout_s):
     stats carries voiced_ratio and longest_run_ms over the captured segment, so
     the caller can tell talking from typing before paying for a cloud call.
     """
-    pre_speech_frames = max(1, PRE_SPEECH_PAD_MS // VAD_FRAME_MS)
-    start_voiced_needed = max(1, START_VOICED_MS // VAD_FRAME_MS)
-    end_silence_needed = max(1, END_SILENCE_MS // VAD_FRAME_MS)
+    pre_speech_frames = max(1, (pre_pad_ms if pre_pad_ms is not None
+                                else PRE_SPEECH_PAD_MS) // VAD_FRAME_MS)
+    start_voiced_needed = max(1, (start_voiced_ms if start_voiced_ms is not None
+                                  else START_VOICED_MS) // VAD_FRAME_MS)
+    end_silence_needed = max(1, (end_silence_ms if end_silence_ms is not None
+                                 else END_SILENCE_MS) // VAD_FRAME_MS)
     max_frames = MAX_UTTERANCE_S * 1000 // VAD_FRAME_MS
     silence_timeout_frames = int(silence_timeout_s * 1000 // VAD_FRAME_MS)
 
@@ -338,11 +378,7 @@ def record_utterance(stream, vad, silence_timeout_s):
         return {"voiced_ratio": (voiced_frames / total_frames) if total_frames else 0.0,
                 "longest_run_ms": longest_run * VAD_FRAME_MS}
 
-    while True:
-        data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
-        # pyaudio may hand back a short buffer on shutdown; skip those.
-        if len(data) != VAD_FRAME_BYTES:
-            continue
+    for data in frames:
         is_speech = vad.is_speech(data, CONV_RATE_IN)
 
         if not in_speech:
@@ -380,6 +416,9 @@ def record_utterance(stream, vad, silence_timeout_s):
                     return b"".join(captured), "speech", stats()
             if total_frames >= max_frames:
                 return b"".join(captured), "speech", stats()
+    # Offline only: the frame source ended. Live, stream_frames never stops.
+    return (b"".join(captured) if in_speech else b""), \
+           ("speech" if in_speech else "timeout"), stats()
 
 
 def set_capture_gain():
@@ -744,8 +783,12 @@ def converse_session(p, api_key):
         utt_ms = len(audio_bytes) * 1000 // (CONV_RATE_IN * 2)
         # Logged on every turn, including good ones, so the thresholds can be
         # tuned against what the parents' room actually produces.
+        # speech_ms is what the cloud actually gets to work with: the capture
+        # minus the pre-roll and the trailing silence that ended it. When this
+        # is small the model hears a fragment, however healthy utt_ms looks.
+        speech_ms = max(0, utt_ms - PRE_SPEECH_PAD_MS - END_SILENCE_MS)
         print(f"[turn {turn}] captured {utt_ms/1000:.1f}s "
-              f"(voiced {st['voiced_ratio']*100:.0f}%, "
+              f"(~{speech_ms}ms speech, voiced {st['voiced_ratio']*100:.0f}%, "
               f"longest run {st['longest_run_ms']}ms).", flush=True)
         too_short = utt_ms < MIN_UTTERANCE_MS
         not_speechlike = (st["longest_run_ms"] < MIN_VOICED_RUN_MS

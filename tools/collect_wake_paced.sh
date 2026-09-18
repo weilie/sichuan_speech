@@ -17,6 +17,7 @@ NAME="${1:?usage: collect_wake_paced.sh <name> <utterances> <gap_s> [gain]}"
 COUNT="${2:?usage: collect_wake_paced.sh <name> <utterances> <gap_s> [gain]}"
 GAP="${3:?usage: collect_wake_paced.sh <name> <utterances> <gap_s> [gain]}"
 GAIN="${4:-}"
+PHRASE="${5:-麻婆豆腐}"   # what to say after each beep
 OUT_DIR="$HOME/sichuan/wake_data"
 OUT="$OUT_DIR/${NAME}.wav"
 MARKS="$OUT_DIR/${NAME}.marks"
@@ -38,7 +39,7 @@ echo "[collect] gain: $(amixer -c "$CARD" sget 'PGA' | grep -m1 'Front Left' | s
 
 DUR=$(( LEAD + COUNT * GAP + TAIL ))
 echo "[collect] $COUNT utterances, one per beep, ${GAP}s apart -> ${DUR}s total"
-echo "[collect] say 麻婆豆腐 ONCE after each beep, then wait for the next"
+echo "[collect] say $PHRASE ONCE after each beep, then wait for the next"
 echo
 
 : > "$MARKS"

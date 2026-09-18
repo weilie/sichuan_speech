@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Measure the utterance endpointer: recall, truncation, and false accepts.
+
+    python3 tools/sweep_vad.py --positives wake_data/q.wav --marks wake_data/q.marks \
+                               --phrase 明天天气怎么样 --negatives wake_data/negatives.wav
+
+Companion to sweep_kws.py, which measures the WAKE detector. This measures
+what happens after the beep: does the capture contain the whole question, or
+a fragment the cloud cannot answer?
+
+Three numbers per setting, because they fail independently:
+
+  recall     — utterances that produced a capture at all. Misses here mean the
+               VAD never opened; the user said something and nothing was sent.
+  complete   — captures whose transcript contains the whole phrase. This is the
+               one that matters. A capture can be 100% recalled and still be a
+               truncated fragment, which is exactly the 2026-09-19 bug: 1.4 s
+               captures of a 1.5 s question, every one of them answered with
+               "I can't hear you".
+  false      — captures from the negatives file (room noise, typing) that
+               SURVIVE the device's noise gate, i.e. that would really reach
+               the cloud. Each one costs two cloud calls and an unwanted spoken
+               reply. Counting raw captures instead overstates this badly: the
+               gate exists precisely to throw most of them away.
+
+Completeness is scored by ASR because no local proxy is trustworthy at this
+SNR: energy-based endpoint detection is the very thing under test, so using it
+as ground truth would be circular. Pass --no-asr for a quick structural run
+that reports recall and false accepts only.
+
+Replays the DEVICE's endpointer (wake_then_converse.endpoint), not a copy.
+"""
+import argparse, json, os, sys, wave, base64, io as _io
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, "/home/weilie/sichuan")
+import webrtcvad
+import wake_then_converse as W
+
+
+def wav_frames(path):
+    w = wave.open(path)
+    assert w.getframerate() == W.CONV_RATE_IN and w.getnchannels() == 1
+    pcm = w.readframes(w.getnframes())
+    n = W.VAD_FRAME_BYTES
+    for i in range(0, len(pcm) - n + 1, n):
+        yield pcm[i:i + n]
+
+
+def passes_gate(audio, st):
+    """The same test converse_session applies before spending a cloud call."""
+    utt_ms = len(audio) * 1000 // (W.CONV_RATE_IN * 2)
+    return (utt_ms >= W.MIN_UTTERANCE_MS
+            and st["longest_run_ms"] >= W.MIN_VOICED_RUN_MS
+            and st["voiced_ratio"] >= W.MIN_VOICED_RATIO)
+
+
+def captures(path, aggressiveness, end_silence_ms, silence_timeout_s=600.0):
+    """Every utterance the endpointer would produce over a whole file, with
+    the frame index each one started at."""
+    vad = webrtcvad.Vad(aggressiveness)
+    frames = wav_frames(path)
+    out = []
+    consumed = [0]
+
+    def counting():
+        for f in frames:
+            consumed[0] += 1
+            yield f
+
+    src = counting()
+    while True:
+        before = consumed[0]
+        audio, reason, st = W.endpoint(src, vad, silence_timeout_s,
+                                       end_silence_ms=end_silence_ms)
+        if reason != "speech" or not audio:
+            return out
+        dur_frames = len(audio) // W.VAD_FRAME_BYTES
+        end_s = consumed[0] * W.VAD_FRAME_MS / 1000.0
+        out.append({"start_s": max(0.0, end_s - dur_frames * W.VAD_FRAME_MS / 1000.0),
+                    "end_s": end_s, "audio": audio, "stats": st,
+                    "gated": not passes_gate(audio, st)})
+        if consumed[0] == before:
+            return out
+
+
+def transcribe(audio, api_key):
+    import dashscope
+    dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
+    b = _io.BytesIO()
+    with wave.open(b, "wb") as o:
+        o.setnchannels(1); o.setsampwidth(2); o.setframerate(W.CONV_RATE_IN)
+        o.writeframes(audio)
+    b64 = base64.b64encode(b.getvalue()).decode()
+    txt = []
+    for r in dashscope.MultiModalConversation.call(
+            api_key=api_key, model=W.MODEL,
+            messages=[{"role": "user", "content": [
+                {"audio": f"data:audio/wav;base64,{b64}"},
+                {"text": "逐字写出这段音频里说的话，只输出原话，不要加任何解释。"}]}],
+            modalities=["text"], max_tokens=60, request_timeout=30,
+            result_format="message", stream=True):
+        j = json.loads(str(r))
+        if (j.get("status_code") or 200) != 200:
+            return ""
+        for c_ in (j.get("output") or {}).get("choices", []) or []:
+            for c in c_.get("message", {}).get("content", []):
+                if isinstance(c, dict) and c.get("text"):
+                    txt.append(c["text"])
+    return "".join(txt)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--positives", required=True)
+    ap.add_argument("--marks", required=True)
+    ap.add_argument("--phrase", required=True,
+                    help="the phrase spoken after each beep, for scoring completeness")
+    ap.add_argument("--negatives")
+    ap.add_argument("--window", type=float, default=5.0,
+                    help="seconds after a beep in which that utterance must start")
+    ap.add_argument("--aggressiveness", default="2",
+                    help="comma-separated VAD levels to try")
+    ap.add_argument("--end-silence", default="800,1400,2000",
+                    help="comma-separated END_SILENCE_MS values to try")
+    ap.add_argument("--no-asr", action="store_true")
+    a = ap.parse_args()
+
+    marks = [float(l.split()[1]) for l in open(a.marks) if l.strip()]
+    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if not a.no_asr and not api_key:
+        sys.exit("DASHSCOPE_API_KEY not set (or pass --no-asr)")
+    # Score each distinct capture once even when settings agree on it.
+    seen = {}
+    print(f"{len(marks)} utterances, phrase {a.phrase!r}\n")
+    print(f"{'agg':>3} {'end_ms':>7} {'recall':>9} {'complete':>10} {'false':>6}  missed")
+    for agg in [int(x) for x in a.aggressiveness.split(",")]:
+        for end_ms in [int(x) for x in a.end_silence.split(",")]:
+            caps = captures(a.positives, agg, end_ms)
+            hit, complete, missed = 0, 0, []
+            for i, m in enumerate(marks, 1):
+                c = next((c for c in caps if m <= c["start_s"] <= m + a.window
+                          and not c["gated"]), None)
+                if c is None:
+                    missed.append(i)
+                    continue
+                hit += 1
+                if a.no_asr:
+                    continue
+                k = (round(c["start_s"], 2), round(c["end_s"], 2))
+                if k not in seen:
+                    seen[k] = transcribe(c["audio"], api_key)
+                if a.phrase in seen[k].replace(" ", ""):
+                    complete += 1
+            nfalse = (len([c for c in captures(a.negatives, agg, end_ms)
+                           if not c["gated"]]) if a.negatives else -1)
+            comp = "n/a" if a.no_asr else f"{complete}/{len(marks)}"
+            fa = "n/a" if nfalse < 0 else str(nfalse)
+            print(f"{agg:>3} {end_ms:>7} {hit:>4}/{len(marks):<4} {comp:>10} {fa:>6}  "
+                  f"{missed if missed else ''}")
+
+
+if __name__ == "__main__":
+    main()
