@@ -38,13 +38,48 @@ import webrtcvad
 import wake_then_converse as W
 
 
-def wav_frames(path):
+def wav_frames(path, start_s=0.0, end_s=None):
     w = wave.open(path)
     assert w.getframerate() == W.CONV_RATE_IN and w.getnchannels() == 1
     pcm = w.readframes(w.getnframes())
     n = W.VAD_FRAME_BYTES
-    for i in range(0, len(pcm) - n + 1, n):
+    lo = int(start_s * W.CONV_RATE_IN) * 2
+    hi = len(pcm) if end_s is None else int(end_s * W.CONV_RATE_IN) * 2
+    lo -= lo % n
+    for i in range(lo, min(hi, len(pcm)) - n + 1, n):
         yield pcm[i:i + n]
+
+
+def capture_per_beep(path, marks, aggressiveness, end_silence_ms,
+                     window, beep_guard):
+    """One independent capture per beep, which is how the DEVICE works: each
+    turn opens the mic, takes one utterance and closes it.
+
+    Replaying the corpus as one continuous stream instead let a single capture
+    run across several beeps whenever the VAD never found enough quiet between
+    them -- three utterances merged into one 11.9 s blob on the 7 s corpus.
+    That is an artifact of continuous replay, not something the device can do,
+    and it silently inflated completeness by crediting a window with its
+    neighbour's words. Restarting at each beep removes it.
+
+    The guard skips the beep tone itself: the corpus records it, the device
+    never hears it (mic opens after playback, then discards 2 s), and being a
+    loud tone the VAD calls it voice -- so it both fakes a capture and keeps
+    the silence counter from ever advancing.
+    """
+    out = []
+    for m in marks:
+        vad = webrtcvad.Vad(aggressiveness)
+        frames = wav_frames(path, m + beep_guard, m + window)
+        audio, reason, st = W.endpoint(frames, vad, window,
+                                       end_silence_ms=end_silence_ms)
+        if reason != "speech" or not audio:
+            out.append(None)
+            continue
+        out.append({"audio": audio, "stats": st,
+                    "dur_s": len(audio) / (W.CONV_RATE_IN * 2),
+                    "gated": not passes_gate(audio, st)})
+    return out
 
 
 def passes_gate(audio, st):
@@ -142,27 +177,20 @@ def main():
     print(f"{'agg':>3} {'end_ms':>7} {'recall':>9} {'complete':>10} {'false':>6}  missed")
     for agg in [int(x) for x in a.aggressiveness.split(",")]:
         for end_ms in [int(x) for x in a.end_silence.split(",")]:
-            caps = [c for c in captures(a.positives, agg, end_ms)
-                    if not c["gated"]]
+            caps = capture_per_beep(a.positives, marks, agg, end_ms,
+                                    a.window, a.beep_guard)
             hit, complete, missed = 0, 0, []
-            for i, m in enumerate(marks, 1):
-                # Overlap, not start-inside: a capture that merged this
-                # utterance with the previous one still carries the audio.
-                ov = [c for c in caps if c["end_s"] > m + a.beep_guard
-                      and c["start_s"] < m + a.window]
-                if not ov:
+            for i, c in enumerate(caps, 1):
+                if c is None or c["gated"]:
                     missed.append(i)
                     continue
                 hit += 1
                 if a.no_asr:
                     continue
-                heard = ""
-                for c in ov:
-                    k = (round(c["start_s"], 2), round(c["end_s"], 2))
-                    if k not in seen:
-                        seen[k] = transcribe(c["audio"], api_key)
-                    heard += seen[k]
-                if a.phrase in heard.replace(" ", ""):
+                k = (agg, end_ms, i)
+                if k not in seen:
+                    seen[k] = transcribe(c["audio"], api_key)
+                if a.phrase in seen[k].replace(" ", ""):
                     complete += 1
             nfalse = (len([c for c in captures(a.negatives, agg, end_ms)
                            if not c["gated"]]) if a.negatives else -1)
