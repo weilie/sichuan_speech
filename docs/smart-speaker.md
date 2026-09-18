@@ -125,6 +125,71 @@ Neither is yet a daemon. Neither has wake-word detection, on-
 device end-of-speech detection, persistent multi-turn memory
 across sessions, or a reliability layer.
 
+### 5.1a Web search: the two-round path (2026-09-19)
+
+Real-time questions (weather, prices, news) are answered by two
+cloud calls per turn, because search and persona cannot coexist in
+one call on this API:
+
+- **Round 1 — research.** Raw audio in, text out, `enable_search`
+  on, and deliberately **no system prompt and no instruction of any
+  kind**. Measured on this Pi, *any* instruction in the search call
+  drops `search_results` to empty and the model invents a number
+  instead — asked one city's temperature it answered 24, 30, 32 on
+  consecutive tries. This is the single non-obvious finding of the
+  whole feature.
+- **Round 2 — voice.** Round 1's facts as text, restyled through
+  the Sichuan persona. Text-only input measures 3.4 s against
+  4.6–5.2 s with the audio re-attached, and time-to-first-audio
+  halves.
+
+**Round 2 runs speculatively, in parallel with round 1.** It
+answers the raw audio on the bet that the turn needs no search
+(the common case). If round 1 reports sources, the speculative
+stream is aborted mid-flight and the restyle runs instead. Serial
+rounds made every ordinary turn slower than before search existed;
+speculation gives that back — a chat turn is ~4.7 s end-to-end, a
+search turn ~8 s. The decision keys on **sources, not on whether
+round 1 returned text**: round 1 answers plenty from its own
+knowledge, and when it did not search, the speculative reply is
+the better one because it heard the question itself.
+
+Two prompt bugs found while validating this, both worth
+remembering because both produced *plausible* wrong output:
+
+- Rail 7 stated the "我这儿查不到" refusal twice (a leftover from
+  the pre-search wording). With 15 sources in hand the model still
+  refused, then hedged. One statement of a refusal, never two.
+- The restyle instruction never said where the text came from, so
+  the model treated verified search results as background chatter.
+  It must say the facts are looked-up and correct.
+
+### 5.1b qwen3.8-omni-flash evaluated and rejected (2026-09-19)
+
+Released 2026-09-18. Text/image/audio/video in, **text out only** —
+no speech synthesis, so it can never replace round 2. It fits round
+1's shape exactly and prices audio input ~98% lower, so it looked
+like a free upgrade. It is not. Medians over 3 reps from the Pi,
+with `enable_thinking=False` (its default reasoning is far worse —
+5.1 s and 11.7 s):
+
+- chat turn: 3.5-omni-flash **1.2 s** vs 3.8 **1.9 s**
+- search turn: 3.5-omni-flash **3.2 s** vs 3.8 **7.0 s**
+
+Round 1 is on the critical path of every turn under speculation, so
+that is the speculation win handed straight back.
+
+The disqualifying result was not latency. Fed a near-silent capture
+(a dead turn), 3.5 said the message seemed incomplete; **3.8
+invented a question, ran 29 searches, and answered confidently
+about UC Berkeley.** A weak mic in an elderly household produces
+marginal captures constantly, and confabulating through them is the
+wrong failure mode for this device. `RESEARCH_MODEL` is a separate
+constant so the swap is one line if a later revision degrades more
+gracefully. Note the model id is `qwen3.8-omni-flash`; the
+`qwen3-8-omni-flash` spelling some write-ups use returns
+`Model not exist`.
+
 ### 5.2 Target shape
 
 ```

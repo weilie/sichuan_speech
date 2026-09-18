@@ -167,9 +167,16 @@ Carried over from `docs/smart-speaker.md`:
   machine. Fun-ASR-Realtime is still on the table as an eventual
   replacement (dedicated Sichuan accent support, DashScope same-
   platform integration) if webrtcvad accuracy proves inadequate.
-- Multi-turn conversation memory within a session. (Each turn
-  currently sends only the system prompt + current audio — no
-  history yet.)
+- ~~Multi-turn conversation memory within a session.~~ **DONE**
+  (commit `41d81d2`). History now also always stores the user's
+  actual audio, never the restyle scaffolding a search turn sends
+  to the voice model.
+- ~~Web search for real-time questions.~~ **DONE 2026-09-19.**
+  Two-round path with a speculative round 2; see §5.1a of the
+  roadmap. Residual: on a search turn the reply sometimes softens
+  the number ("二十多度" instead of "24到25度") even though the
+  facts contain it. Tighten the restyle instruction if it shows up
+  in real use.
 - ~~Daemon-shape wrapper (systemd, restart)~~ **DONE 2026-07-19.**
   Systemd user service + linger + auto-restart. See
   `docs/deployment.md`. Still open: cleaner network-blip reconnect

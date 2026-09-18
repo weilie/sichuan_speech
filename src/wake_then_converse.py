@@ -118,9 +118,16 @@ MAX_HISTORY_TURNS = 3
 # instruction in the user turn drops search_results to empty and the model
 # invents a number instead (asked one city's temperature it answered 24, 30,
 # 32 on consecutive tries). So pass 1 gets no instructions at all and pass 2
-# carries the whole persona. max_tokens caps pass 1's verbosity; it does not
-# suppress search.
-RESEARCH_MAX_TOKENS = 100
+# carries the whole persona. max_tokens caps round 1's verbosity; it does not
+# suppress search. 160, not 100: a weather answer at 100 truncated mid-number,
+# and a fact round 2 cannot see is a fact it will not say.
+RESEARCH_MAX_TOKENS = 160
+# Round 2 is launched at the same moment as round 1, on the bet that this turn
+# needs no search. See SpeculativeVoice. Set False for strictly serial rounds.
+SPECULATIVE_VOICE = True
+# Bound on waiting for the speculative call, so a hung stream cannot wedge the
+# daemon 1000 km from anyone who could restart it.
+SPEC_WAIT_TIMEOUT_S = 60
 # A search turn costs ~6 s in pass 1 alone, so say something out loud rather
 # than leaving an elderly listener in silence. Non-search turns come back in
 # ~1.5 s and never reach the timer.
@@ -132,9 +139,31 @@ FILLER_WAV = "/home/weilie/sichuan/checking.wav"
 MAX_CONSECUTIVE_DEAD_TURNS = 2
 
 VOICE = "Sunny"
-# 3.5 series: required for enable_search (the 3.0 models have no
-# search at all). Handles audio in / audio out exactly like 3.0.
+# Round 2, the voice. 3.5 series: required for enable_search (the 3.0 models
+# have no search at all), and it is the newest series that can still SPEAK —
+# 3.8-Omni-Flash is text-out only.
 MODEL = "qwen3.5-omni-flash"
+# Round 1, the research. Split from MODEL so the two rounds can move
+# independently: this pass is audio in / text out, so it does not need a model
+# that can speak.
+#
+# qwen3.8-omni-flash was measured here on 2026-09-19 and REJECTED, despite
+# fitting the shape and pricing audio input ~98% lower. Medians over 3 reps
+# from the Pi, 3.8 with enable_thinking=False (its default reasoning is far
+# worse still — 5.1 s and 11.7 s):
+#   chat turn:   3.5 -> 1.2 s   3.8 -> 1.9 s
+#   search turn: 3.5 -> 3.2 s   3.8 -> 7.0 s
+# Round 1 sits on the critical path of EVERY turn now that round 2 runs
+# speculatively, so +0.7 s on chat and +3.8 s on search is the whole
+# speculation win given back and then some.
+#
+# The disqualifying result was not latency though. Fed a near-silent capture
+# (a dead turn), 3.5 said the message seemed incomplete; 3.8 invented a
+# question, ran 29 searches and answered confidently about UC Berkeley. A weak
+# mic in an elderly household produces marginal captures constantly, and a
+# model that confabulates through them is the wrong failure mode for this
+# device. Revisit if a later 3.8 revision degrades more gracefully.
+RESEARCH_MODEL = "qwen3.5-omni-flash"
 SICHUAN_SYSTEM_PROMPT = (
     "你是一个用四川话回答的语音助手，扮演的角色像家里孝顺的孙辈，"
     "在跟长辈聊天。回答要求："
@@ -148,13 +177,11 @@ SICHUAN_SYSTEM_PROMPT = (
     "家里人或者医生商量，不要自己给判断。"
     "6. 万一听不清对方说的啥子，就温和地请他们再讲一遍，"
     "不要瞎猜。"
-    "7. 有时候我会把查到的资料附在问题后头。有资料就照资料回答，"
-    "该报的数字（温度好多度、价钱好多钱）要报出来，但是用你自己的话"
-    "两三句讲完，不要念资料原文。没得资料又是实时的事情，就老实说"
-    "“我这儿查不到”，喊他们看手机或者问屋头的人。任何时候都不准"
-    "自己编数字。"
-    "万一确实查不到，就老实说“我这儿查不到”，喊他们看手机或者问"
-    "屋头的人。绝对不准自己编个数字（比如温度、价钱）说得像真的一样。"
+    "7. 有时候我会把刚刚查到的最新资料附在问题后头。只要有资料，"
+    "就照资料回答，该报的数字（温度好多度、价钱好多钱）一定要报出来，"
+    "用你自己的话两三句讲完，不要念资料原文，更不准说“查不到”。"
+    "只有在没得资料、又问的是实时的事情时，才老实说“我这儿查不到”，"
+    "喊他们看手机或者问屋头的人。任何时候都不准自己编数字。"
 )
 RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
@@ -294,15 +321,20 @@ def ensure_filler(api_key):
               flush=True)
 
 
-def research_pass(audio_b64, api_key):
-    """Pass 1: raw audio in, facts out. No system prompt, no instructions —
+def research_pass(audio_b64, api_key, on_search=None):
+    """Round 1: raw audio in, facts out. No system prompt, no instructions —
     see RESEARCH_MAX_TOKENS. Returns (facts_text, n_sources); facts_text is
-    "" if the call failed, in which case pass 2 answers unaided."""
+    "" if the call failed, in which case round 2 answers unaided.
+
+    on_search() fires the moment the stream first reports a non-empty
+    search_info. That is the signal that this turn genuinely needed the web,
+    and it is what lets the speculative voice call be killed early instead of
+    generating audio nobody will hear."""
     t0 = time.monotonic()
     parts, n_sources = [], 0
     try:
         for resp in dashscope.MultiModalConversation.call(
-            api_key=api_key, model=MODEL,
+            api_key=api_key, model=RESEARCH_MODEL,
             messages=[{"role": "user",
                        "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]}],
             modalities=["text"],
@@ -317,6 +349,14 @@ def research_pass(audio_b64, api_key):
                 return "", 0
             out = j.get("output") or {}
             hits = (out.get("search_info") or {}).get("search_results") or []
+            if hits and not n_sources:
+                # How early this lands decides how much speculative audio we
+                # pay for on a search turn. Logged so it can be checked in
+                # the field rather than assumed.
+                print(f"[research] search fired at {time.monotonic()-t0:.1f}s "
+                      f"({len(hits)} sources).", flush=True)
+                if on_search is not None:
+                    on_search()
             n_sources = max(n_sources, len(hits))
             for ch in out.get("choices", []) or []:
                 for c in ch.get("message", {}).get("content", []):
@@ -326,68 +366,44 @@ def research_pass(audio_b64, api_key):
         print(f"[research] failed after {time.monotonic()-t0:.1f}s: "
               f"{type(e).__name__}: {e}", flush=True)
         return "", 0
-    print(f"[research] {time.monotonic()-t0:.1f}s, {n_sources} sources.", flush=True)
+    print(f"[research] {time.monotonic()-t0:.1f}s, {n_sources} sources "
+          f"({RESEARCH_MODEL}).", flush=True)
     return "".join(parts), n_sources
 
 
-def cloud_reply(audio_bytes, api_key, history):
-    """Send one utterance to qwen3-omni-flash and play the audio reply.
-    Returns True on success, False on cloud error / no audio."""
-    with wave.open(RECORDING_WAV, "wb") as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(CONV_RATE_IN)
-        w.writeframes(audio_bytes)
-    with open(RECORDING_WAV, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+def voice_call(content, history, api_key, stop_event=None):
+    """Round 2: one call to the voice model carrying the full persona and the
+    session history. `content` is either the user's audio (answering the
+    question directly) or round 1's facts as text (restyling them). Returns
+    (text, audio_chunks), or None on failure or abort.
 
-    # Pass 1: research. A holding phrase plays if it runs long enough to
-    # mean a real search is happening.
-    filler = None
-    if os.path.exists(FILLER_WAV):
-        filler = threading.Timer(FILLER_DELAY_S, play_wav, args=(FILLER_WAV,))
-        filler.start()
-    facts, n_sources = research_pass(audio_b64, api_key)
-    if filler is not None:
-        filler.cancel()
-
-    # Pass 2: the voice. Text-only when pass 1 produced something — measured
-    # 3.4 s against 4.6-5.2 s with the audio attached, and time-to-first-
-    # audio-chunk halves (1.5 s vs 3.2 s). Pass 2 never needs to hear the
-    # question: it is restyling pass 1's answer, not answering afresh. The
-    # audio is only re-sent when pass 1 gave us nothing, so the turn can
-    # still be answered unaided rather than dropped.
-    if facts:
-        content = [{"text": "把下面这段内容，用四川话讲给长辈听，两三句话讲完，"
-                            "数字要保留，不要念原文：\n" + facts}]
-    else:
-        content = [{"audio": f"data:audio/wav;base64,{audio_b64}"}]
-    user_msg = {"role": "user", "content": content}
-    print("[turn] sending to cloud...", flush=True)
+    Transient DNS / socket / TLS errors — Pi 3 Wi-Fi is flaky — would
+    otherwise raise out of the streaming iterator and take the daemon down.
+    Any failure here is a dead turn, which converse_session already counts."""
     t0 = time.monotonic()
-    # Wrap the entire cloud call + stream iteration. Transient DNS /
-    # socket / TLS errors (Pi 3 Wi-Fi is flaky) would otherwise raise
-    # out of the streaming iterator and take the daemon down. Treat
-    # any failure here as a "dead turn" — session.py counts it and
-    # ends the session after MAX_CONSECUTIVE_DEAD_TURNS.
-    audio_chunks = []
-    text_parts = []
+    audio_chunks, text_parts = [], []
     try:
         responses = dashscope.MultiModalConversation.call(
             api_key=api_key, model=MODEL,
             messages=(
                 [{"role": "system", "content": [{"text": SICHUAN_SYSTEM_PROMPT}]}]
                 + history
-                + [user_msg]
+                + [{"role": "user", "content": content}]
             ),
             modalities=["text", "audio"],
             audio={"voice": VOICE, "format": "wav"},
             result_format="message", stream=True,
         )
         for resp in responses:
+            if stop_event is not None and stop_event.is_set():
+                print(f"[voice] aborted at {time.monotonic()-t0:.1f}s.", flush=True)
+                return None
             j = json.loads(str(resp))
             status = j.get("status_code")
             if status and status != 200:
-                print(f"[turn] cloud error: {status} {j.get('code')}: {j.get('message')}", flush=True)
-                return False
+                print(f"[voice] cloud error: {status} {j.get('code')}: "
+                      f"{j.get('message')}", flush=True)
+                return None
             for ch in (j.get("output") or {}).get("choices", []) or []:
                 for c in ch.get("message", {}).get("content", []):
                     if not isinstance(c, dict): continue
@@ -396,12 +412,111 @@ def cloud_reply(audio_bytes, api_key, history):
                     if isinstance(au, dict) and au.get("data"):
                         audio_chunks.append(au["data"])
     except Exception as e:
-        print(f"[turn] cloud request failed after {time.monotonic()-t0:.1f}s: "
+        print(f"[voice] request failed after {time.monotonic()-t0:.1f}s: "
               f"{type(e).__name__}: {e}", flush=True)
+        return None
+    print(f"[voice] {time.monotonic()-t0:.1f}s, {len(audio_chunks)} chunks.",
+          flush=True)
+    return "".join(text_parts), audio_chunks
+
+
+class SpeculativeVoice:
+    """Round 2 launched in PARALLEL with round 1, betting the turn needs no
+    web search — which is the common case. 你好 and 你吃了没 do not need the
+    internet, and paying round 1's ~2.3 s serially before round 2 even started
+    made every ordinary turn slower than it had been before search existed.
+
+    Win (round 1 reports no sources): this call IS the answer and the turn
+    costs one round-trip again. Lose: round 1's on_search fires, the stream is
+    abandoned mid-flight, and the restyle path runs with no latency lost — the
+    discarded call overlapped the research that beat it. The wasted audio
+    tokens on a search turn buy the latency back on every other turn, and the
+    early abort keeps that waste small."""
+
+    def __init__(self, audio_b64, history, api_key):
+        self.stop = threading.Event()
+        self.result = None
+        # History is copied, not shared: cloud_reply mutates the real list
+        # once the turn resolves, and this thread may still be reading it.
+        self._thread = threading.Thread(
+            target=self._run, args=(audio_b64, list(history), api_key),
+            daemon=True)
+        self._thread.start()
+
+    def _run(self, audio_b64, history, api_key):
+        self.result = voice_call(
+            [{"audio": f"data:audio/wav;base64,{audio_b64}"}],
+            history, api_key, stop_event=self.stop)
+
+    def abort(self):
+        self.stop.set()
+
+    def wait(self):
+        self._thread.join(SPEC_WAIT_TIMEOUT_S)
+        if self._thread.is_alive():
+            print("[voice] speculative call still running after "
+                  f"{SPEC_WAIT_TIMEOUT_S}s — abandoning it.", flush=True)
+            self.abort()
+            return None
+        return self.result
+
+
+def cloud_reply(audio_bytes, api_key, history):
+    """One user turn. Round 1 researches while a speculative round 2 answers
+    the audio directly; whichever way round 1 settles decides which reply is
+    spoken. Returns True on success, False on cloud error / no audio."""
+    with wave.open(RECORDING_WAV, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(CONV_RATE_IN)
+        w.writeframes(audio_bytes)
+    with open(RECORDING_WAV, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+    t0 = time.monotonic()
+
+    spec = (SpeculativeVoice(audio_b64, history, api_key)
+            if SPECULATIVE_VOICE else None)
+
+    # The holding phrase now only reaches a turn slow enough to mean a real
+    # search is happening: a speculative win cancels the timer first.
+    filler = None
+    if os.path.exists(FILLER_WAV):
+        filler = threading.Timer(FILLER_DELAY_S, play_wav, args=(FILLER_WAV,))
+        filler.start()
+    facts, n_sources = research_pass(
+        audio_b64, api_key, on_search=(spec.abort if spec else None))
+    if filler is not None:
+        filler.cancel()
+
+    # Decide on SOURCES, not on whether round 1 returned text. Round 1 answers
+    # plenty of questions from its own knowledge without searching; when it did
+    # not search, the speculative reply is missing nothing — and it is the
+    # better answer anyway, because it heard the question itself rather than a
+    # paraphrase of it.
+    result = None
+    if n_sources > 0 and facts:
+        if spec is not None:
+            spec.abort()
+        result = voice_call(
+            [{"text": "下面是我刚才帮你查到的最新资料，是准的。"
+                      "照着它用四川话回答长辈的问题，两三句话讲完，"
+                      "温度、价钱这些数字一定要讲出来，不要念原文，"
+                      "也不要说查不到。称呼直接用“您”，不准写成"
+                      "“爷爷/奶奶”这种带杠的写法——这段话是要念出来的：\n" + facts}],
+            history, api_key)
+    elif spec is not None:
+        result = spec.wait()
+    if result is None:
+        # Nothing usable from either path — answer the audio unaided rather
+        # than drop the turn. Also the path taken when SPECULATIVE_VOICE=False
+        # and the turn did not search.
+        result = voice_call(
+            [{"audio": f"data:audio/wav;base64,{audio_b64}"}], history, api_key)
+    if result is None:
         return False
-    print(f"[turn] voice pass {time.monotonic()-t0:.1f} s "
-          f"(research gave {n_sources} sources).", flush=True)
-    print("[turn] reply:", "".join(text_parts), flush=True)
+    text, audio_chunks = result
+
+    print(f"[turn] {time.monotonic()-t0:.1f}s total, {n_sources} sources.",
+          flush=True)
+    print("[turn] reply:", text, flush=True)
     if not audio_chunks:
         print("[turn] no audio in response.", flush=True)
         return False
@@ -414,11 +529,14 @@ def cloud_reply(audio_bytes, api_key, history):
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
             w.writeframes(reply_bytes)
     play_wav(RESPONSE_WAV)
-    # Only successful turns join the history: a failed call must not
-    # leave a dangling user turn with no assistant answer after it.
-    history.append(user_msg)
-    history.append({"role": "assistant",
-                    "content": [{"text": "".join(text_parts)}]})
+    # History carries the user's ACTUAL question as audio, never the restyle
+    # instruction a search turn sends to the voice model. That blob is
+    # scaffolding; storing it made turn N+1 see "把下面这段内容…" as something
+    # the user had said. Only successful turns join the history, so a failed
+    # call cannot leave a dangling user turn with no answer after it.
+    history.append({"role": "user",
+                    "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]})
+    history.append({"role": "assistant", "content": [{"text": text}]})
     del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
     return True
 
