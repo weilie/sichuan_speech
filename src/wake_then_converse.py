@@ -108,6 +108,20 @@ POST_DEAD_SILENCE_TIMEOUT_S = 2.5
 # A real conversation runs unbounded; a room with just background noise
 # burns at most MAX_CONSECUTIVE_DEAD_TURNS turns before we drop out.
 MIN_UTTERANCE_MS = 400
+# A capture long enough to pass MIN_UTTERANCE_MS can still be nothing but
+# keyboard clicks, and that is not a harmless case: it costs two cloud calls,
+# the model answers "I can't hear you", the turn counts as a SUCCESS, and the
+# session stays open to do it again. Observed doing exactly that on 2026-09-19.
+#
+# What separates typing from talking is not energy but continuity. Speech holds
+# voiced frames together in syllable-length runs; a keystroke is a 20-40 ms
+# impulse. So the gate is on the longest unbroken voiced run, with the voiced
+# ratio as a weaker second check. Both are deliberately loose -- the mic is
+# quiet and VAD_AGGRESSIVENESS had to come down to 2 for real speech to survive
+# -- and both are logged on every turn so they can be tuned from field logs
+# rather than guessed at again.
+MIN_VOICED_RUN_MS = 240
+MIN_VOICED_RATIO = 0.25
 # How many previous exchanges to replay to the model so a session feels
 # like one conversation instead of N unrelated questions. Each retained
 # user turn re-uploads its base64 WAV (~40 KB per second of speech), so
@@ -122,6 +136,21 @@ MAX_HISTORY_TURNS = 3
 # suppress search. 160, not 100: a weather answer at 100 truncated mid-number,
 # and a fact round 2 cannot see is a fact it will not say.
 RESEARCH_MAX_TOKENS = 160
+# Round 1 gets no system prompt, so it also has no idea where the device is.
+# Measured 2026-09-19: "明天天气怎么样？" returns ZERO sources and a reply asking
+# which city; the same question with a location line returns 14. This is the
+# single most common question this device will ever be asked, and it was
+# failing every time.
+#
+# Note what this does NOT contradict: an INSTRUCTION in round 1's user turn
+# still kills search (see above). A statement of fact does not. Context is
+# safe to add here; commands are not.
+#
+# The date is included because "明天" is meaningless without it — without the
+# date the model dated tomorrow inconsistently (周五 in one reply, 周六 in the
+# next). It comes from the Pi's clock, so the Pi's timezone must match where
+# the device physically sits, not where it was set up.
+DEVICE_LOCATION = "四川成都"
 # Round 2 is launched at the same moment as round 1, on the bet that this turn
 # needs no search. See SpeculativeVoice. Set False for strictly serial rounds.
 SPECULATIVE_VOICE = True
@@ -282,9 +311,11 @@ def record_utterance(stream, vad, silence_timeout_s):
     """Read 20 ms VAD frames from an already-open input stream until one
     utterance is captured or silence_timeout_s elapses with no speech.
 
-    Returns (raw_pcm_bytes, reason):
+    Returns (raw_pcm_bytes, reason, stats):
       reason == "speech"  → utterance captured, bytes contain int16 mono PCM
       reason == "timeout" → no speech in silence_timeout_s, bytes is b""
+    stats carries voiced_ratio and longest_run_ms over the captured segment, so
+    the caller can tell talking from typing before paying for a cloud call.
     """
     pre_speech_frames = max(1, PRE_SPEECH_PAD_MS // VAD_FRAME_MS)
     start_voiced_needed = max(1, START_VOICED_MS // VAD_FRAME_MS)
@@ -299,6 +330,13 @@ def record_utterance(stream, vad, silence_timeout_s):
     silence_run = 0
     total_frames = 0
     leading_silence = 0
+    voiced_frames = 0
+    cur_run = 0
+    longest_run = 0
+
+    def stats():
+        return {"voiced_ratio": (voiced_frames / total_frames) if total_frames else 0.0,
+                "longest_run_ms": longest_run * VAD_FRAME_MS}
 
     while True:
         data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
@@ -318,22 +356,30 @@ def record_utterance(stream, vad, silence_timeout_s):
                     captured.extend(ring); ring = []
                     silence_run = 0
                     total_frames = len(captured)
+                    voiced_frames = voiced_run
+                    cur_run = voiced_run
+                    longest_run = voiced_run
             else:
                 voiced_run = 0
                 leading_silence += 1
                 if leading_silence >= silence_timeout_frames:
-                    return b"", "timeout"
+                    return b"", "timeout", stats()
         else:
             captured.append(data)
             total_frames += 1
             if is_speech:
                 silence_run = 0
+                voiced_frames += 1
+                cur_run += 1
+                if cur_run > longest_run:
+                    longest_run = cur_run
             else:
+                cur_run = 0
                 silence_run += 1
                 if silence_run >= end_silence_needed:
-                    return b"".join(captured), "speech"
+                    return b"".join(captured), "speech", stats()
             if total_frames >= max_frames:
-                return b"".join(captured), "speech"
+                return b"".join(captured), "speech", stats()
 
 
 def set_capture_gain():
@@ -411,8 +457,10 @@ def research_pass(audio_b64, api_key, on_search=None):
     try:
         for resp in dashscope.MultiModalConversation.call(
             api_key=api_key, model=RESEARCH_MODEL,
-            messages=[{"role": "user",
-                       "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]}],
+            messages=[{"role": "user", "content": [
+                {"audio": f"data:audio/wav;base64,{audio_b64}"},
+                {"text": f"（我在{DEVICE_LOCATION}，今天是"
+                         f"{time.strftime('%Y年%m月%d日')}）"}]}],
             modalities=["text"],
             enable_search=True,
             search_options={"search_strategy": "agent", "enable_source": True},
@@ -686,7 +734,7 @@ def converse_session(p, api_key):
         else:
             timeout = FOLLOWUP_SILENCE_TIMEOUT_S
         print(f"[turn {turn}] listening (VAD; silence timeout {timeout}s)...", flush=True)
-        audio_bytes, reason = record_utterance(stream, vad, timeout)
+        audio_bytes, reason, st = record_utterance(stream, vad, timeout)
         stream.stop_stream(); stream.close()
 
         if reason == "timeout":
@@ -694,15 +742,23 @@ def converse_session(p, api_key):
             return
 
         utt_ms = len(audio_bytes) * 1000 // (CONV_RATE_IN * 2)
-        if utt_ms < MIN_UTTERANCE_MS:
+        # Logged on every turn, including good ones, so the thresholds can be
+        # tuned against what the parents' room actually produces.
+        print(f"[turn {turn}] captured {utt_ms/1000:.1f}s "
+              f"(voiced {st['voiced_ratio']*100:.0f}%, "
+              f"longest run {st['longest_run_ms']}ms).", flush=True)
+        too_short = utt_ms < MIN_UTTERANCE_MS
+        not_speechlike = (st["longest_run_ms"] < MIN_VOICED_RUN_MS
+                          or st["voiced_ratio"] < MIN_VOICED_RATIO)
+        if too_short or not_speechlike:
             dead_turns += 1
-            print(f"[turn {turn}] {utt_ms}ms — too short, treating as noise (dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
+            why = "too short" if too_short else "no speech-like voicing"
+            print(f"[turn {turn}] {why} — treating as noise, no cloud call "
+                  f"(dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
             if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
                 print(f"[session] {dead_turns} consecutive dead turns — ending.", flush=True)
                 return
             continue
-
-        print(f"[turn {turn}] captured {utt_ms/1000:.1f}s of speech.", flush=True)
         ok = cloud_reply(audio_bytes, api_key, history)
         if ok:
             dead_turns = 0
