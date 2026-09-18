@@ -83,7 +83,22 @@ mic_spacing   = 55;    // Distance between the two HAT mics (approx)
 mic_port_y_walls = true;   // big ports in the -Y and +Y walls
 mic_port_x_wall  = true;   // vent/port array in the -X (GPIO) wall
 
-mic_port_w    = 36;    // Along the wall (case X) — wall is 99 long
+// Mic X position, re-measured from build photos 2026-09-19 and NOT the
+// same as the lid's long-standing guess. Scaling against the HAT's
+// micro-USB receptacle (7.4 mm shell) puts each mic ~7.4 mm inward
+// from the HAT's GPIO-header edge, right beside a corner mounting
+// hole — not the ~28 mm the lid's mic_holes() has always assumed.
+// That is a 20 mm error, and it matters: it means the -X (GPIO) wall
+// is ~10 mm from the mics while the -Y/+Y walls are ~20-24 mm away
+// AND 21 mm off in X. The -X wall is the right wall to open.
+mic_x_from_gpio_edge = 7.4;
+
+// 18, not 36: once mic_x moved from the guessed 33.5 to the measured
+// 12.9, a 36 mm port centred on it ran from x = -5.1, i.e. off the end
+// of the wall, which prints as an open notch in the corner instead of
+// a port. These are the SECONDARY openings now anyway — the -X wall is
+// where the mics actually are.
+mic_port_w    = 18;    // Along the wall (case X) — wall is 99 long
 mic_port_h    = 18;    // Vertical extent
 mic_port_r    = 3;     // Corner radius: printable, and no stress riser
                        // at a sharp corner in a 3 mm wall
@@ -223,7 +238,7 @@ module base_mic_ports() {
     // two ends of the HAT, so the -Y and +Y walls are the closest
     // outside air to them (~20-24 mm), against ~28 mm up to the open
     // top and much further through the closed lid.
-    mic_x = wall_t + pi_x0 + 28;
+    mic_x = wall_t + pi_x0 + mic_x_from_gpio_edge;
 
     if (mic_port_y_walls) {
         // -Y wall
@@ -235,20 +250,25 @@ module base_mic_ports() {
     }
 
     if (mic_port_x_wall) {
-        // -X wall (GPIO edge). Further from the mics laterally, but it
-        // is the wall the HAT's outer edge faces, and it doubles as the
-        // ventilation the punch list has wanted since v10 — a Pi 3B has
-        // been seen at 58 C on open bench, and a sealed box only adds.
-        // Three slots rather than one opening so the wall keeps some
-        // stiffness for the snap fit above it.
-        slot_w = 14;
-        slot_gap = 8;
-        y_center = wall_t + pi_y0 + pi_w / 2;
-        for (i = [-1, 0, 1])
-            translate([-0.1,
-                       y_center + i * (slot_w + slot_gap) - slot_w / 2,
-                       mic_port_z])
-                rounded_slot_x(slot_w, mic_port_h, mic_port_r,
+        // -X wall (GPIO edge) — the PRIMARY opening, because the mics
+        // sit only ~10 mm behind it.
+        //
+        // Deliberately spans nearly the whole wall rather than being
+        // centred on computed mic positions. Their X is now measured,
+        // but their Y is not: the two mics sit at the ends of the HAT's
+        // long axis, roughly 55-60 mm apart, and the photos do not pin
+        // that down to better than ~10 mm. A full-length opening makes
+        // the answer independent of that uncertainty, which is the
+        // whole point of a test print. Ribs keep the wall stiff enough
+        // for the snap fit above.
+        y_lo = 8;
+        y_hi = outer_w - 8;
+        n_slots = 4;
+        rib = 6;
+        span = (y_hi - y_lo - (n_slots - 1) * rib) / n_slots;
+        for (i = [0 : n_slots - 1])
+            translate([-0.1, y_lo + i * (span + rib), mic_port_z])
+                rounded_slot_x(span, mic_port_h, mic_port_r,
                                wall_t + 0.2);
     }
 }
