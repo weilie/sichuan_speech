@@ -6,6 +6,10 @@
 //   lid    — cups over the base; top face holds the Dayton DMA45-4
 //            speaker (top-firing) and two 3 mm mic holes above the
 //            HAT's mic positions
+//   v15    — big mic ports cut into the BASE side walls, to test
+//            whether a short direct air path recovers the 7.8 dB the
+//            closed lid costs. Test print: openings are deliberately
+//            oversized.
 //
 // Iteration policy: place mic hole positions from best guess for v1
 // print, then refine after test-fit.
@@ -60,6 +64,37 @@ sp_boss_pilot = 3;     // v13: matches sp_screw_dia so the whole
 mic_dia       = 3;
 mic_spacing   = 55;    // Distance between the two HAT mics (approx)
 
+// ---- (v15) Mic ports in the BASE side walls ----
+// Measured 2026-09-19: closing the lid costs 4.9 dB of signal and
+// raises the noise floor 2.9 dB — a net 7.8 dB SNR penalty. Wake word
+// fires 4/4 with the lid off and 1/4 with it on. The cause is that
+// both HAT mics face UP into a deep sealed cavity that also contains
+// the speaker, and their only path to outside air is a 3 mm hole in
+// the lid's top face, tens of mm away and placed by guess.
+//
+// This version is a TEST PRINT, not the final answer. It asks one
+// question: does giving the mics a direct, short path to outside air
+// recover the lost 7.8 dB? So the openings are deliberately far larger
+// than a finished design would use — if holes this generous do not
+// help, holes are not the fix and the board must be relocated to sit
+// under the enclosure's outer surface (see docs/next-session.md §0).
+//
+// Set either flag false to isolate which opening did the work.
+mic_port_y_walls = true;   // big ports in the -Y and +Y walls
+mic_port_x_wall  = true;   // vent/port array in the -X (GPIO) wall
+
+mic_port_w    = 36;    // Along the wall (case X) — wall is 99 long
+mic_port_h    = 18;    // Vertical extent
+mic_port_r    = 3;     // Corner radius: printable, and no stress riser
+                       // at a sharp corner in a 3 mm wall
+
+// hat_top_z / mic_port_z are DERIVED and live further down with the
+// other derived values, because they depend on floor_t, which is
+// defined after this block. OpenSCAD does not resolve that forward
+// reference: it warns "Ignoring unknown variable", the value becomes
+// undef, and every port silently cuts NOTHING while still rendering a
+// clean manifold base. Caught only because the genus did not change.
+
 cable_dia     = 12;    // Grommet must clear the CanaKit micro-USB
                        // plug + strain-relief boot (~11 mm wide),
                        // NOT just the bare cable. Started at 9 mm
@@ -112,6 +147,18 @@ lid_lip_clearance   = 0.3; // Gap between base outer wall and lid inner
 inner_l = pi_l + gpio_x_clear + port_x_clear;
 inner_w = pi_w + sd_y_clear + usb_y_clear;
 base_h  = floor_t + pi_h_stack;
+
+// (v15) Height of the HAT's top surface above the base's outer ground,
+// and therefore of the mic ports. Derived rather than guessed so it
+// stays correct if the standoffs change:
+//   floor_t   top of floor
+//   + 4       standoff (pi_standoff default h)
+//   + 1.4     Pi PCB
+//   + 8.5     GPIO header
+//   + 1.6     HAT PCB
+hat_top_z  = floor_t + 4 + 1.4 + 8.5 + 1.6;     // ≈ 18.5
+mic_port_z = hat_top_z - mic_port_h / 2 + 2;    // band straddling the
+                                                // mic plane, biased up
 outer_l = inner_l + 2 * wall_t;
 outer_w = inner_w + 2 * wall_t;
 
@@ -145,6 +192,65 @@ module pi_standoffs_group() {
     for (x = [x0, x0 + pi_mount_dx],
          y = [y0, y0 + pi_mount_dy])
         translate([x, y, 0]) pi_standoff();
+}
+
+module rounded_slot_y(w, h, r, depth) {
+    // Rounded rectangle extruded along +Y: cuts through a -Y / +Y wall.
+    // w runs along X, h along Z, measured from the translate origin.
+    hull()
+        for (dx = [r, w - r], dz = [r, h - r])
+            translate([dx, 0, dz])
+                rotate([-90, 0, 0])
+                    cylinder(h = depth, r = r);
+}
+
+module rounded_slot_x(w, h, r, depth) {
+    // Same, extruded along +X: cuts through the -X wall. w runs along
+    // Y, h along Z. Kept as its own module rather than rotating the
+    // Y version, because rotating it sends the depth the wrong way and
+    // the cut lands outside the wall, removing nothing.
+    hull()
+        for (dy = [r, w - r], dz = [r, h - r])
+            translate([0, dy, dz])
+                rotate([0, 90, 0])
+                    cylinder(h = depth, r = r);
+}
+
+module base_mic_ports() {
+    // Mic X position: same assumption the lid's mic_holes() uses —
+    // ~28 mm inward from the GPIO edge, which is where the HAT's mics
+    // sit relative to its GPIO connector. Their Y positions are the
+    // two ends of the HAT, so the -Y and +Y walls are the closest
+    // outside air to them (~20-24 mm), against ~28 mm up to the open
+    // top and much further through the closed lid.
+    mic_x = wall_t + pi_x0 + 28;
+
+    if (mic_port_y_walls) {
+        // -Y wall
+        translate([mic_x - mic_port_w / 2, -0.1, mic_port_z])
+            rounded_slot_y(mic_port_w, mic_port_h, mic_port_r, wall_t + 0.2);
+        // +Y wall
+        translate([mic_x - mic_port_w / 2, outer_w - wall_t - 0.1, mic_port_z])
+            rounded_slot_y(mic_port_w, mic_port_h, mic_port_r, wall_t + 0.2);
+    }
+
+    if (mic_port_x_wall) {
+        // -X wall (GPIO edge). Further from the mics laterally, but it
+        // is the wall the HAT's outer edge faces, and it doubles as the
+        // ventilation the punch list has wanted since v10 — a Pi 3B has
+        // been seen at 58 C on open bench, and a sealed box only adds.
+        // Three slots rather than one opening so the wall keeps some
+        // stiffness for the snap fit above it.
+        slot_w = 14;
+        slot_gap = 8;
+        y_center = wall_t + pi_y0 + pi_w / 2;
+        for (i = [-1, 0, 1])
+            translate([-0.1,
+                       y_center + i * (slot_w + slot_gap) - slot_w / 2,
+                       mic_port_z])
+                rounded_slot_x(slot_w, mic_port_h, mic_port_r,
+                               wall_t + 0.2);
+    }
 }
 
 module snap_bumps_on_base() {
@@ -190,6 +296,8 @@ module base() {
                    -0.1,
                    led_slit_z])
             cube([led_slit_w, wall_t + 0.2, led_slit_h]);
+        // (v15) Mic ports — see the mic_port_* block above.
+        base_mic_ports();
     }
     // Pi mounting standoffs on the floor
     translate([wall_t, wall_t, floor_t])
