@@ -26,6 +26,8 @@ import numpy as np
 import pyaudio
 import dashscope
 import webrtcvad
+import queue
+import threading
 from sherpa_onnx import KeywordSpotter
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
@@ -35,6 +37,38 @@ KWS_MODEL_DIR = "/home/weilie/sichuan/models/sherpa-onnx-kws-zipformer-wenetspee
 KWS_KEYWORDS_FILE = "/home/weilie/sichuan/models/wake_keywords.txt"
 
 WAKE_RATE = 16000
+# Wake-word sensitivity. KWS_THRESHOLD/KWS_SCORE drive the real detector.
+# A second "loose" spotter runs on the same audio at NEARMISS_THRESHOLD so
+# an utterance that ALMOST fired gets logged instead of vanishing silently.
+# sherpa-onnx exposes no per-result score, so a parallel spotter is the only
+# way to see near misses. The second decode runs on its own thread — done
+# inline it cost the Pi 3 40% of its frame rate (51 -> 31 frames/5s), which
+# would starve the real detector. Set NEARMISS_LOGGING = False to drop it.
+# Chosen by tools/sweep_kws.py over a labelled corpus (19 beep-paced
+# utterances + 3 min of room audio): 17/19 recall with ZERO false alarms.
+# The sweep found no false alarm anywhere in the grid, even at the most
+# sensitive corner — precision is simply not the binding constraint here,
+# so sensitivity is set high. Two utterances are missed at every setting;
+# ASR confirms both clearly say 麻婆豆腐, so that residue is a limit of the
+# KWS model, not of this tuning. Re-run the sweep before changing these.
+KWS_SCORE = 4.0
+# Capture gain, applied at every start. This is the highest-impact setting in
+# the whole wake path: replaying the corpus at simulated gains gives 63%
+# recall at the card default (~16 dB) against 89% here, and it DECLINES above
+# this point (84% at +3 dB). The KWS tuning above was swept at this gain, so
+# the two belong together. Addressed by card NAME — .asoundrc hardcodes card
+# 2, but index ordering is not guaranteed across kernel updates.
+CAPTURE_CARD = "seeed2micvoicec"
+CAPTURE_PGA = 60          # 30.00 dB on this codec (range 0-119)
+KWS_THRESHOLD = 0.05
+# Off since the live detector was tuned to 4.0/0.05: there is no meaningfully
+# looser setting left to compare against (the sweep shows 5.0/0.02 catches
+# FEWER utterances, not more), so the watcher can no longer tell us anything
+# and its second decode thread is pure cost. Flip back on only if the live
+# tuning is loosened again.
+NEARMISS_LOGGING = False
+NEARMISS_SCORE = 2.5
+NEARMISS_THRESHOLD = 0.10
 WAKE_CHUNK = 1600              # 100 ms @ 16 kHz
 
 CONV_RATE_IN = 16000
@@ -42,7 +76,13 @@ CONV_CHUNK = 1600
 WARMUP_SECS = 3.5
 
 # VAD-gated recording
-VAD_AGGRESSIVENESS = 3                # 0..3 (higher = more aggressive filtering).
+VAD_AGGRESSIVENESS = 2                # 0..3 (higher = more aggressive filtering).
+                                      # Dropped 3 -> 2 on 2026-08-29: at 3 a real
+                                      # answer after the wake beep was discarded
+                                      # as non-speech and the session timed out
+                                      # in silence. Mic level is weak (floor
+                                      # ~1700 RMS, speech only ~2600), so the
+                                      # strictest setting rejects genuine speech.
                                       # 3 rejects more marginal audio so faint
                                       # bleed / echo doesn't open a fake turn.
 VAD_FRAME_MS = 20                     # webrtcvad accepts 10/20/30 ms frames
@@ -73,10 +113,28 @@ MIN_UTTERANCE_MS = 400
 # user turn re-uploads its base64 WAV (~40 KB per second of speech), so
 # this trades upload time on the Pi's Wi-Fi against context depth.
 MAX_HISTORY_TURNS = 3
+# Two-pass cloud path. Pass 1 (research) sends the raw audio with web search
+# enabled and NOTHING else — measured on this Pi, ANY system prompt or even an
+# instruction in the user turn drops search_results to empty and the model
+# invents a number instead (asked one city's temperature it answered 24, 30,
+# 32 on consecutive tries). So pass 1 gets no instructions at all and pass 2
+# carries the whole persona. max_tokens caps pass 1's verbosity; it does not
+# suppress search.
+RESEARCH_MAX_TOKENS = 100
+# A search turn costs ~6 s in pass 1 alone, so say something out loud rather
+# than leaving an elderly listener in silence. Non-search turns come back in
+# ~1.5 s and never reach the timer.
+# 3.5 s, not 2.0: the research pass takes ~2.3 s even when it does not search,
+# so a 2 s timer announced "let me look that up" on every single turn — including
+# 你好. Only a turn that is actually slow should get the holding phrase.
+FILLER_DELAY_S = 3.5
+FILLER_WAV = "/home/weilie/sichuan/checking.wav"
 MAX_CONSECUTIVE_DEAD_TURNS = 2
 
 VOICE = "Sunny"
-MODEL = "qwen3-omni-flash"
+# 3.5 series: required for enable_search (the 3.0 models have no
+# search at all). Handles audio in / audio out exactly like 3.0.
+MODEL = "qwen3.5-omni-flash"
 SICHUAN_SYSTEM_PROMPT = (
     "你是一个用四川话回答的语音助手，扮演的角色像家里孝顺的孙辈，"
     "在跟长辈聊天。回答要求："
@@ -90,10 +148,13 @@ SICHUAN_SYSTEM_PROMPT = (
     "家里人或者医生商量，不要自己给判断。"
     "6. 万一听不清对方说的啥子，就温和地请他们再讲一遍，"
     "不要瞎猜。"
-    "7. 你没得联网查东西的本事，晓不得今天的天气、日期、时间、"
-    "新闻、股价这些实时消息。碰到这类问题就老实说“我这儿查不到”，"
-    "喊他们看手机或者问屋头的人。绝对不准编个数字（比如温度、"
-    "价钱）说得像真的一样。"
+    "7. 有时候我会把查到的资料附在问题后头。有资料就照资料回答，"
+    "该报的数字（温度好多度、价钱好多钱）要报出来，但是用你自己的话"
+    "两三句讲完，不要念资料原文。没得资料又是实时的事情，就老实说"
+    "“我这儿查不到”，喊他们看手机或者问屋头的人。任何时候都不准"
+    "自己编数字。"
+    "万一确实查不到，就老实说“我这儿查不到”，喊他们看手机或者问"
+    "屋头的人。绝对不准自己编个数字（比如温度、价钱）说得像真的一样。"
 )
 RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
@@ -172,6 +233,103 @@ def record_utterance(stream, vad, silence_timeout_s):
                 return b"".join(captured), "speech"
 
 
+def set_capture_gain():
+    """Force the mic gain the wake tuning was measured at.
+
+    ALSA mixer state does not survive a reboot unless someone ran alsactl
+    store, and a hand-run command on one SD card is invisible to this repo —
+    so the service sets it itself on every start. Never fatal: a speaker that
+    refuses to boot is worse than one running at the wrong gain. But never
+    silent either, because wrong gain presents as "it doesn't hear me
+    sometimes", which is expensive to diagnose from 1000 km away."""
+    try:
+        r = subprocess.run(
+            ["amixer", "-c", CAPTURE_CARD, "sset", "PGA", str(CAPTURE_PGA)],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            print(f"[boot] WARNING could not set capture gain on "
+                  f"{CAPTURE_CARD}: {r.stderr.strip()[:200]}", flush=True)
+            return
+        level = next((ln.strip() for ln in r.stdout.splitlines()
+                      if "Front Left: Capture" in ln), "")
+        print(f"[boot] capture gain -> {level or CAPTURE_PGA}", flush=True)
+    except Exception as e:
+        print(f"[boot] WARNING could not set capture gain: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+
+def ensure_filler(api_key):
+    """Synthesise the 'let me look that up' holding phrase once and keep it
+    on disk. Best-effort: if it fails we simply stay silent while searching."""
+    if os.path.exists(FILLER_WAV):
+        return
+    try:
+        chunks = []
+        for resp in dashscope.MultiModalConversation.call(
+            api_key=api_key, model=MODEL,
+            messages=[{"role": "user", "content": [{"text":
+                "只念这一句，不要加别的字：等哈儿，我帮你查一下哈。"}]}],
+            modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
+            result_format="message", stream=True):
+            j = json.loads(str(resp))
+            for ch in (j.get("output") or {}).get("choices", []) or []:
+                for c in ch.get("message", {}).get("content", []):
+                    if isinstance(c, dict):
+                        au = c.get("audio")
+                        if isinstance(au, dict) and au.get("data"):
+                            chunks.append(au["data"])
+        if not chunks:
+            return
+        raw = b"".join(base64.b64decode(c) for c in chunks)
+        if raw[:4] == b"RIFF":
+            with open(FILLER_WAV, "wb") as f:
+                f.write(raw)
+        else:
+            with wave.open(FILLER_WAV, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(raw)
+        print("[boot] cached holding phrase.", flush=True)
+    except Exception as e:
+        print(f"[boot] could not cache holding phrase: {type(e).__name__}: {e}",
+              flush=True)
+
+
+def research_pass(audio_b64, api_key):
+    """Pass 1: raw audio in, facts out. No system prompt, no instructions —
+    see RESEARCH_MAX_TOKENS. Returns (facts_text, n_sources); facts_text is
+    "" if the call failed, in which case pass 2 answers unaided."""
+    t0 = time.monotonic()
+    parts, n_sources = [], 0
+    try:
+        for resp in dashscope.MultiModalConversation.call(
+            api_key=api_key, model=MODEL,
+            messages=[{"role": "user",
+                       "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]}],
+            modalities=["text"],
+            enable_search=True,
+            search_options={"search_strategy": "agent", "enable_source": True},
+            max_tokens=RESEARCH_MAX_TOKENS,
+            result_format="message", stream=True):
+            j = json.loads(str(resp))
+            status = j.get("status_code")
+            if status and status != 200:
+                print(f"[research] cloud error: {status} {j.get('code')}", flush=True)
+                return "", 0
+            out = j.get("output") or {}
+            hits = (out.get("search_info") or {}).get("search_results") or []
+            n_sources = max(n_sources, len(hits))
+            for ch in out.get("choices", []) or []:
+                for c in ch.get("message", {}).get("content", []):
+                    if isinstance(c, dict) and c.get("text"):
+                        parts.append(c["text"])
+    except Exception as e:
+        print(f"[research] failed after {time.monotonic()-t0:.1f}s: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return "", 0
+    print(f"[research] {time.monotonic()-t0:.1f}s, {n_sources} sources.", flush=True)
+    return "".join(parts), n_sources
+
+
 def cloud_reply(audio_bytes, api_key, history):
     """Send one utterance to qwen3-omni-flash and play the audio reply.
     Returns True on success, False on cloud error / no audio."""
@@ -181,8 +339,28 @@ def cloud_reply(audio_bytes, api_key, history):
     with open(RECORDING_WAV, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    user_msg = {"role": "user",
-                "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]}
+    # Pass 1: research. A holding phrase plays if it runs long enough to
+    # mean a real search is happening.
+    filler = None
+    if os.path.exists(FILLER_WAV):
+        filler = threading.Timer(FILLER_DELAY_S, play_wav, args=(FILLER_WAV,))
+        filler.start()
+    facts, n_sources = research_pass(audio_b64, api_key)
+    if filler is not None:
+        filler.cancel()
+
+    # Pass 2: the voice. Text-only when pass 1 produced something — measured
+    # 3.4 s against 4.6-5.2 s with the audio attached, and time-to-first-
+    # audio-chunk halves (1.5 s vs 3.2 s). Pass 2 never needs to hear the
+    # question: it is restyling pass 1's answer, not answering afresh. The
+    # audio is only re-sent when pass 1 gave us nothing, so the turn can
+    # still be answered unaided rather than dropped.
+    if facts:
+        content = [{"text": "把下面这段内容，用四川话讲给长辈听，两三句话讲完，"
+                            "数字要保留，不要念原文：\n" + facts}]
+    else:
+        content = [{"audio": f"data:audio/wav;base64,{audio_b64}"}]
+    user_msg = {"role": "user", "content": content}
     print("[turn] sending to cloud...", flush=True)
     t0 = time.monotonic()
     # Wrap the entire cloud call + stream iteration. Transient DNS /
@@ -221,7 +399,8 @@ def cloud_reply(audio_bytes, api_key, history):
         print(f"[turn] cloud request failed after {time.monotonic()-t0:.1f}s: "
               f"{type(e).__name__}: {e}", flush=True)
         return False
-    print(f"[turn] cloud round-trip {time.monotonic()-t0:.1f} s.", flush=True)
+    print(f"[turn] voice pass {time.monotonic()-t0:.1f} s "
+          f"(research gave {n_sources} sources).", flush=True)
     print("[turn] reply:", "".join(text_parts), flush=True)
     if not audio_chunks:
         print("[turn] no audio in response.", flush=True)
@@ -307,7 +486,51 @@ def converse_session(p, api_key):
                 return
 
 
-def build_kws():
+class NearMissWatcher:
+    """Runs a deliberately over-sensitive copy of the spotter on a worker
+    thread. When it fires and the live detector did not, the phrase was
+    spoken and rejected on threshold — which is the thing the logs could
+    not distinguish from silence before. Diagnostic only: it never wakes
+    the device. Frames are dropped rather than queued without bound, so a
+    slow decode degrades this watcher and never the real detector."""
+
+    def __init__(self):
+        self.q = queue.Queue(maxsize=40)
+        self.last_detection = 0.0
+        self.dropped = 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def feed(self, audio_f32, peak_rms):
+        try:
+            self.q.put_nowait((audio_f32, peak_rms))
+        except queue.Full:
+            self.dropped += 1
+
+    def note_detection(self):
+        self.last_detection = time.monotonic()
+
+    def _run(self):
+        spotter = build_kws(NEARMISS_SCORE, NEARMISS_THRESHOLD)
+        stream = spotter.create_stream()
+        while True:
+            audio_f32, peak_rms = self.q.get()
+            stream.accept_waveform(WAKE_RATE, audio_f32)
+            while spotter.is_ready(stream):
+                spotter.decode_stream(stream)
+            if not spotter.get_result(stream):
+                continue
+            spotter.reset_stream(stream)
+            # The live detector fires first; anything within 2 s of a real
+            # wake is that same utterance, not a miss.
+            if time.monotonic() - self.last_detection < 2.0:
+                continue
+            print(f"[wake] NEAR-MISS: heard at threshold={NEARMISS_THRESHOLD}/"
+                  f"score={NEARMISS_SCORE}, rejected by live "
+                  f"{KWS_THRESHOLD}/{KWS_SCORE} (peak_rms={peak_rms}, "
+                  f"dropped_frames={self.dropped})", flush=True)
+
+
+def build_kws(keywords_score=KWS_SCORE, keywords_threshold=KWS_THRESHOLD):
     return KeywordSpotter(
         tokens=f"{KWS_MODEL_DIR}/tokens.txt",
         encoder=f"{KWS_MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
@@ -316,8 +539,8 @@ def build_kws():
         keywords_file=KWS_KEYWORDS_FILE,
         num_threads=1,
         max_active_paths=4,
-        keywords_score=1.5,
-        keywords_threshold=0.25,
+        keywords_score=keywords_score,
+        keywords_threshold=keywords_threshold,
         num_trailing_blanks=1,
         provider="cpu",
     )
@@ -329,9 +552,12 @@ def main():
         sys.exit("DASHSCOPE_API_KEY not set")
 
     make_beep("/tmp/ack.wav")
+    set_capture_gain()
+    ensure_filler(api_key)
 
     print("[boot] loading sherpa-onnx KeywordSpotter (麻婆豆腐)...", flush=True)
     kws = build_kws()
+    nearmiss = NearMissWatcher() if NEARMISS_LOGGING else None
 
     p = pyaudio.PyAudio()
 
@@ -352,6 +578,8 @@ def main():
         last_stats = time.monotonic()
         frames_w = 0
         peak_rms_w = 0
+        clipped_w = 0
+        samples_w = 0
         try:
             while True:
                 data = wake_stream.read(WAKE_CHUNK, exception_on_overflow=False)
@@ -360,18 +588,30 @@ def main():
                 if len(audio_i16) > 0:
                     rms = int(math.sqrt(float(np.mean(audio_i16.astype(np.int64) ** 2))))
                     if rms > peak_rms_w: peak_rms_w = rms
+                    # Samples pinned near full scale mean the ADC is
+                    # saturating: the waveform the model sees is a
+                    # distorted version of the phrase, which is exactly
+                    # how "louder makes it worse" happens.
+                    clipped_w += int(np.count_nonzero(np.abs(audio_i16) > 32000))
+                    samples_w += len(audio_i16)
                 # sherpa-onnx wants float32 in [-1, 1]
                 audio_f32 = audio_i16.astype(np.float32) / 32768.0
                 kws_stream.accept_waveform(WAKE_RATE, audio_f32)
                 while kws.is_ready(kws_stream):
                     kws.decode_stream(kws_stream)
                 result = kws.get_result(kws_stream)
+                if nearmiss is not None:
+                    nearmiss.feed(audio_f32, peak_rms_w)
                 frames_w += 1
                 if time.monotonic() - last_stats >= 5.0:
-                    print(f"[wake] frames={frames_w}/5s peak_rms={peak_rms_w}", flush=True)
-                    frames_w = 0; peak_rms_w = 0
+                    clip_pct = (100.0 * clipped_w / samples_w) if samples_w else 0.0
+                    print(f"[wake] frames={frames_w}/5s peak_rms={peak_rms_w} "
+                          f"clipped={clip_pct:.2f}%", flush=True)
+                    frames_w = 0; peak_rms_w = 0; clipped_w = 0; samples_w = 0
                     last_stats = time.monotonic()
                 if result:
+                    if nearmiss is not None:
+                        nearmiss.note_detection()
                     print(f"\n*** WAKE detected ({result!r}) — opening session ***", flush=True)
                     # Free codec for the conversation
                     wake_stream.stop_stream(); wake_stream.close(); wake_stream = None
