@@ -12,6 +12,104 @@ Also delivered since first capture: Sichuan system-prompt expansion
 (2026-07-08, commit `e699d43`) — grandchild persona, brevity cap,
 health/finance safety rails.
 
+## 0. START HERE — the two problems blocking the build (2026-09-19)
+
+Everything else in this file is context. These two are what actually
+stop the device working in a room it was not hand-tuned for, and they
+are **coupled**: do (1) first, then re-measure (2).
+
+### (1) The microphones need a hardware change
+
+Closing the lid costs **4.9 dB of signal and raises the noise floor by
+2.9 dB — a net 7.8 dB SNR penalty**, dropping the wake path from
+20.5 dB to 12.7 dB. Measured by recording the same four utterances,
+same spot, same settings, lid open vs closed:
+
+- lid **open**: wake fires **4/4**
+- lid **closed**: wake fires **1/4**
+
+Nothing in software recovers this, and that is measured, not assumed:
+looser KWS thresholds caught *zero* of four, digital gain to +12 dB
+stayed at 1/4 and collapsed to 0/4 by +16 dB, four pronunciation
+variants (including the Sichuan f→h merge) changed nothing, and
+high-pass filtering at 80/150/250 Hz did nothing or made it worse.
+
+Cause, confirmed from photos of the build: both MEMS mics sit on the
+HAT **in the base, facing up**, each beside a corner mounting hole —
+one immediately left of the HAT's micro-USB, the other diagonally
+opposite. With the lid on they look up into a deep sealed cavity that
+also contains the speaker, and their only path to outside air is a
+3 mm hole in the lid's top face placed on a best-guess.
+
+How Echo / Nest / HomePod solve it: the mic PCB sits directly under
+the enclosure's outer surface and **every mic port is sealed by a
+gasket to its own hole 1-3 mm away**, so the mic is acoustically
+outside the box; the driver lives in a separate sealed chamber. Two
+rules, both currently violated: short sealed port, and mics never
+share air with the driver.
+
+Options, in order of preference:
+1. Relocate the Pi + HAT stack against the top face, mic corners
+   1-2 mm under it, a hole over each port, gasket sealing port to
+   hole; speaker into its own sub-chamber. Real `case.scad` rework.
+2. Cheap proof first: drill ~6-8 mm holes in the base side wall level
+   with the HAT's top surface, one beside each mic, and re-run the
+   4-utterance test.
+3. Fallback only: external USB mic. No commercial product does this;
+   it costs a second ALSA device and a cable to knock loose.
+
+### (2) The voice/environment classifier needs better precision and recall
+
+webrtcvad labelled only **41-46% of real speech frames as voice**,
+which causes both failure modes:
+
+- **Recall** — a capture ends after `END_SILENCE_MS` of frames *not
+  labelled* voice, which is not the same as silence. At 800 ms this
+  cut a 1.5 s question down to ~300 ms and the cloud answered "I
+  can't hear you" every time. Now 1400 ms; measured per-utterance at
+  that setting, five of six clean utterances capture complete and one
+  truncates to a single syllable.
+- **Precision** — ~9 captures survive the noise gate across 3 minutes
+  of room audio. Each costs two cloud calls and an unwanted spoken
+  reply, and none counts as a dead turn (the cloud *did* answer), so
+  the session stays open to do it again. Nobody has yet looked at
+  *which* 9 — dump them with timestamps and transcripts first, since
+  typing, next-room speech and a fridge compressor need different
+  fixes.
+
+**Re-measure before tuning.** Every number above was taken at the
+degraded SNR of problem (1). Fix the mics, re-run
+`tools/sweep_vad.py`, and only then decide whether webrtcvad needs
+replacing. What will *not* improve on its own is false accepts:
+webrtcvad fires on typing at any SNR.
+
+Caveat on the sweep's false-accept column: the count falls as
+`END_SILENCE_MS` rises (20 at 800, 9 at 1400, 7 at 2000) because the
+same noise merges into fewer, longer captures. It is only comparable
+at a fixed end-silence.
+
+### (3) Also worth doing regardless: a press-to-talk button
+
+The HAT has a user button on GPIO17 and `src/converse.py` already
+implements press-to-talk. It works at any distance, in any room, at
+any placement — the only option that makes the device usable whatever
+happens with (1) and (2), and more discoverable for elderly users than
+a wake phrase, not less.
+
+### Tools for this work
+
+- `tools/wake_livecheck.py` — record live, replay through the spotter
+  at the live setting and looser ones. Answers "does what the mic
+  hears now look like what it was tuned on".
+- `tools/sweep_vad.py` — recall / completeness / false accepts for the
+  endpointer, replaying the device's own `endpoint()`. Pass
+  `--phrase` matching what was actually said; scoring a 麻婆豆腐 corpus
+  against 明天天气怎么样 returns a confident 0/12 that means nothing.
+- `tools/collect_wake_paced.sh` — beep-paced labelled corpus; takes an
+  optional phrase argument. Launched detached, its on-screen prompt
+  goes to a log nobody reads, so state the phrase out loud to whoever
+  is recording.
+
 ## 1. Chinese wake word — DONE 2026-07-04
 
 Full swap from openWakeWord to sherpa-onnx KWS. Wake phrase 麻婆豆腐
