@@ -181,6 +181,21 @@ Carried over from `docs/smart-speaker.md`:
   Systemd user service + linger + auto-restart. See
   `docs/deployment.md`. Still open: cleaner network-blip reconnect
   and log caps.
+- **Residual findings from the 2026-09-19 adversarial review** (the
+  five serious ones are fixed in `src/wake_then_converse.py`; these
+  three were left):
+  - A failed restyle falls through to a *fourth* cloud call, and the
+    holding phrase is not re-armed, so the user waits it out in
+    silence.
+  - The search branch aborts the speculative thread but never joins
+    it. `voice_call` only checks the stop event between SSE chunks,
+    so a stream stalled mid-read survives; each zombie pins ~5 MB
+    (its base64 audio plus a history copy) on a 1 GB Pi until the
+    SDK read timeout kills it.
+  - `ensure_filler` writes `checking.wav` non-atomically and
+    short-circuits on mere existence, so a power cut mid-write
+    caches a truncated file permanently. Write to a temp path and
+    `os.replace`.
 - Cost protection (Alibaba console hard caps + on-device usage
   limits).
 - Remote access (Tailscale) for post-deployment troubleshooting.

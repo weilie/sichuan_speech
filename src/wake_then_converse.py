@@ -125,9 +125,22 @@ RESEARCH_MAX_TOKENS = 160
 # Round 2 is launched at the same moment as round 1, on the bet that this turn
 # needs no search. See SpeculativeVoice. Set False for strictly serial rounds.
 SPECULATIVE_VOICE = True
-# Bound on waiting for the speculative call, so a hung stream cannot wedge the
-# daemon 1000 km from anyone who could restart it.
-SPEC_WAIT_TIMEOUT_S = 60
+# Bound on waiting for the speculative call. 12 s, not 60: a normal turn
+# completes in ~4.7 s, so anything past ~12 s is a sick stream, and 60 s of
+# silence is indistinguishable from a hang to someone standing in a kitchen.
+SPEC_WAIT_TIMEOUT_S = 12
+# Deadlines on the two FOREGROUND cloud calls. These matter more than the one
+# above: the speculative call runs on a daemon thread that can be abandoned for
+# free, while these block the main loop with the mic closed and no wake word
+# being heard — and the process stays alive, so systemd's Restart= never fires.
+#
+# Both halves are needed. request_timeout is what the DashScope SDK hands to
+# requests as a PER-SOCKET-READ timeout (default 300 s), so on its own it lets
+# a stream that trickles bytes block forever; the deadline check inside each
+# stream loop is the actual wall-clock bound.
+REQUEST_TIMEOUT_S = 10
+RESEARCH_DEADLINE_S = 20
+VOICE_DEADLINE_S = 30
 # A search turn costs ~6 s in pass 1 alone, so say something out loud rather
 # than leaving an elderly listener in silence. Non-search turns come back in
 # ~1.5 s and never reach the timer.
@@ -187,9 +200,72 @@ RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
 
 
+# Every aplay in this process goes through this lock. The codec is half-duplex
+# and ~/.asoundrc points default at a bare plughw:2,0 with no dmix, so a second
+# concurrent open returns -EBUSY and that audio is simply lost. The holding
+# phrase plays from a timer thread while the main thread may be ready to play
+# the reply, so "concurrent" is a real state here, not a theoretical one.
+AUDIO_LOCK = threading.Lock()
+
+
+def _aplay(path):
+    """Unlocked playback primitive. Callers must hold AUDIO_LOCK."""
+    if not os.path.exists(path):
+        print(f"[audio] missing {path}", flush=True)
+        return False
+    r = subprocess.run(["aplay", "-q", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        # Never silent. A reply that failed to play looks exactly like a
+        # successful turn in the logs otherwise, and "it answered but we heard
+        # nothing" is the most expensive thing to diagnose from 1000 km away.
+        print(f"[audio] aplay failed on {path}: rc={r.returncode} "
+              f"{r.stderr.strip()[:160]}", flush=True)
+        return False
+    return True
+
+
 def play_wav(path):
-    if os.path.exists(path):
-        subprocess.run(["aplay", "-q", path], check=False)
+    with AUDIO_LOCK:
+        return _aplay(path)
+
+
+def wait_for_audio_idle():
+    """Block until nothing is playing. Called before opening the mic: the
+    holding phrase runs on its own thread and can still be emitting when a
+    turn ends, and opening input while the speaker runs is exactly what the
+    half-duplex codec cannot do."""
+    with AUDIO_LOCK:
+        pass
+
+
+class HoldingPhrase:
+    """Plays "let me look that up" if the turn is still unresolved when the
+    timer fires, and nothing at all once it has been cancelled.
+
+    Timer.cancel() alone is not enough: it is a no-op once the timer has
+    already fired, and by then play_wav is blocking inside aplay holding the
+    codec — so the reply's own aplay collided with it, lost to -EBUSY, while
+    cloud_reply went on to report the turn as a success. The flag is checked
+    under AUDIO_LOCK so a cancel racing with playback resolves one way or the
+    other, never into an overlap."""
+
+    def __init__(self):
+        self._cancelled = False
+        self._timer = None
+        if os.path.exists(FILLER_WAV):
+            self._timer = threading.Timer(FILLER_DELAY_S, self._fire)
+            self._timer.start()
+
+    def _fire(self):
+        with AUDIO_LOCK:
+            if self._cancelled:
+                return
+            _aplay(FILLER_WAV)
+
+    def cancel(self):
+        self._cancelled = True
+        if self._timer is not None:
+            self._timer.cancel()
 
 
 def make_beep(path, freq=880, secs=0.15):
@@ -341,7 +417,12 @@ def research_pass(audio_b64, api_key, on_search=None):
             enable_search=True,
             search_options={"search_strategy": "agent", "enable_source": True},
             max_tokens=RESEARCH_MAX_TOKENS,
+            request_timeout=REQUEST_TIMEOUT_S,
             result_format="message", stream=True):
+            if time.monotonic() - t0 > RESEARCH_DEADLINE_S:
+                print(f"[research] deadline {RESEARCH_DEADLINE_S}s exceeded — "
+                      f"going with what arrived ({n_sources} sources).", flush=True)
+                break
             j = json.loads(str(resp))
             status = j.get("status_code")
             if status and status != 200:
@@ -392,12 +473,17 @@ def voice_call(content, history, api_key, stop_event=None):
             ),
             modalities=["text", "audio"],
             audio={"voice": VOICE, "format": "wav"},
+            request_timeout=REQUEST_TIMEOUT_S,
             result_format="message", stream=True,
         )
         for resp in responses:
             if stop_event is not None and stop_event.is_set():
                 print(f"[voice] aborted at {time.monotonic()-t0:.1f}s.", flush=True)
                 return None
+            if time.monotonic() - t0 > VOICE_DEADLINE_S:
+                print(f"[voice] deadline {VOICE_DEADLINE_S}s exceeded after "
+                      f"{len(audio_chunks)} chunks — stopping.", flush=True)
+                break
             j = json.loads(str(resp))
             status = j.get("status_code")
             if status and status != 200:
@@ -475,24 +561,31 @@ def cloud_reply(audio_bytes, api_key, history):
     spec = (SpeculativeVoice(audio_b64, history, api_key)
             if SPECULATIVE_VOICE else None)
 
-    # The holding phrase now only reaches a turn slow enough to mean a real
-    # search is happening: a speculative win cancels the timer first.
-    filler = None
-    if os.path.exists(FILLER_WAV):
-        filler = threading.Timer(FILLER_DELAY_S, play_wav, args=(FILLER_WAV,))
-        filler.start()
-    facts, n_sources = research_pass(
-        audio_b64, api_key, on_search=(spec.abort if spec else None))
-    if filler is not None:
-        filler.cancel()
+    # The holding phrase only reaches a turn slow enough to mean a real search
+    # is happening: a speculative win cancels it first.
+    holding = HoldingPhrase()
+    # Whether round 1 SEARCHED, tracked separately from whether it SUCCEEDED.
+    # on_search kills the speculative call irreversibly, and round 1 can still
+    # fail after that point and report 0 sources — which used to send us to
+    # spec.wait() on a thread guaranteed to return None, throwing away a good
+    # reply and paying for a third round-trip to rediscover that.
+    search_fired = threading.Event()
 
-    # Decide on SOURCES, not on whether round 1 returned text. Round 1 answers
-    # plenty of questions from its own knowledge without searching; when it did
-    # not search, the speculative reply is missing nothing — and it is the
-    # better answer anyway, because it heard the question itself rather than a
-    # paraphrase of it.
+    def _on_search():
+        search_fired.set()
+        if spec is not None:
+            spec.abort()
+
+    facts, n_sources = research_pass(audio_b64, api_key, on_search=_on_search)
+    holding.cancel()
+
+    # Restyle only when round 1 both SEARCHED and produced text. Round 1
+    # answers plenty of questions from its own knowledge without searching;
+    # when it did not search, the speculative reply is missing nothing — and it
+    # is the better answer anyway, because it heard the question itself rather
+    # than a paraphrase of it.
     result = None
-    if n_sources > 0 and facts:
+    if facts and (n_sources > 0 or search_fired.is_set()):
         if spec is not None:
             spec.abort()
         result = voice_call(
@@ -502,8 +595,14 @@ def cloud_reply(audio_bytes, api_key, history):
                       "也不要说查不到。称呼直接用“您”，不准写成"
                       "“爷爷/奶奶”这种带杠的写法——这段话是要念出来的：\n" + facts}],
             history, api_key)
-    elif spec is not None:
+    elif spec is not None and not search_fired.is_set():
         result = spec.wait()
+    elif spec is not None:
+        # Search fired and then round 1 failed. The speculative stream is
+        # already dead and joining it can only return None, so skip straight
+        # to answering unaided rather than waiting to be told that.
+        print("[turn] search fired but research failed — answering unaided.",
+              flush=True)
     if result is None:
         # Nothing usable from either path — answer the audio unaided rather
         # than drop the turn. Also the path taken when SPECULATIVE_VOICE=False
@@ -528,7 +627,12 @@ def cloud_reply(audio_bytes, api_key, history):
         with wave.open(RESPONSE_WAV, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
             w.writeframes(reply_bytes)
-    play_wav(RESPONSE_WAV)
+    if not play_wav(RESPONSE_WAV):
+        # The audio was generated but never reached the room. Count it as a
+        # dead turn and keep it out of the history: as far as the user is
+        # concerned this answer does not exist, and a session that silently
+        # "remembers" something never spoken drifts from there on.
+        return False
     # History carries the user's ACTUAL question as audio, never the restyle
     # instruction a search turn sends to the voice model. That blob is
     # scaffolding; storing it made turn N+1 see "把下面这段内容…" as something
@@ -553,6 +657,12 @@ def converse_session(p, api_key):
     dead_turns = 0
     while True:
         turn += 1
+        # The holding-phrase timer fires on its own thread and can still be
+        # emitting when a turn ends early (a failed call, a dead turn). Opening
+        # input on a half-duplex codec while it plays either raises OSError —
+        # which escapes main(), killing the daemon — or lets the device hear
+        # its own voice.
+        wait_for_audio_idle()
         stream = p.open(
             format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
             input=True, frames_per_buffer=VAD_FRAME_SAMPLES,
