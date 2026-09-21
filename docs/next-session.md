@@ -58,6 +58,34 @@ Options, in order of preference:
 3. Fallback only: external USB mic. No commercial product does this;
    it costs a second ALSA device and a cable to knock loose.
 
+#### v15 test print — protocol and what follows
+
+`enclosure/base.stl` (v15c, commit `25a77e9`) has deliberately
+oversized openings: four 16.2 × 18 mm slots spanning the -X (GPIO)
+wall, and one 18 × 18 mm port in each of the -Y and +Y walls, all in
+a z band of 11-29.5 mm straddling the mic plane at ~18.5 mm. Lid
+unchanged.
+
+To keep the result comparable, re-run `tools/wake_livecheck.py` from
+the same spot at the same volume with the lid **closed**. The baseline
+to beat is **1/4 detections closed vs 4/4 open**.
+
+- **Near 4/4 closed** → mechanism confirmed. Then shrink the openings
+  — but shrink them the way commercial speakers do: a SMALL hole
+  within a few mm of the mic port, covered with acoustically
+  transparent mesh. Mesh is what keeps dust out; simply making a hole
+  that sits 10 mm away smaller mostly gives the signal back. Use the
+  `mic_port_y_walls` / `mic_port_x_wall` flags to find which set of
+  openings did the work before deciding what to keep.
+- **Still ~1/4** → holes are not the fix. Move the board up under the
+  enclosure's outer surface with gasketed ports, per the options
+  above.
+
+Also still wrong: the lid's `mic_holes()` uses the old ~28 mm guess,
+so its two 3 mm holes have never been over the microphones. Left
+alone because the lid is not being reprinted, but fix it whenever the
+lid is next touched.
+
 ### (2) The voice/environment classifier needs better precision and recall
 
 webrtcvad labelled only **41-46% of real speech frames as voice**,
