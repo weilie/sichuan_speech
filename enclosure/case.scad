@@ -241,11 +241,18 @@ module base_mic_ports() {
     mic_x = wall_t + pi_x0 + mic_x_from_gpio_edge;
 
     if (mic_port_y_walls) {
+        // Clamped away from the -X wall. Centring these on mic_x put
+        // their near edge at x = 3.9, leaving a 0.9 mm web against the
+        // -X wall's inner face — a single-wall sliver at a 0.4 mm
+        // nozzle, visible in the slicer as a thin triangle at the
+        // corner and certain to break. 6 mm minimum gives two solid
+        // perimeters plus infill.
+        y_wall_port_x = max(mic_x - mic_port_w / 2, wall_t + 6);
         // -Y wall
-        translate([mic_x - mic_port_w / 2, -0.1, mic_port_z])
+        translate([y_wall_port_x, -0.1, mic_port_z])
             rounded_slot_y(mic_port_w, mic_port_h, mic_port_r, wall_t + 0.2);
         // +Y wall
-        translate([mic_x - mic_port_w / 2, outer_w - wall_t - 0.1, mic_port_z])
+        translate([y_wall_port_x, outer_w - wall_t - 0.1, mic_port_z])
             rounded_slot_y(mic_port_w, mic_port_h, mic_port_r, wall_t + 0.2);
     }
 
