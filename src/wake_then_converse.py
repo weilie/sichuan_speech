@@ -28,7 +28,7 @@ import dashscope
 import webrtcvad
 import queue
 import threading
-from sherpa_onnx import KeywordSpotter
+from sherpa_onnx import KeywordSpotter, VadModel, VadModelConfig
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
 
@@ -101,6 +101,35 @@ VAD_AGGRESSIVENESS = 2                # 0..3 (higher = more aggressive filtering
                                       # 3 rejects more marginal audio so faint
                                       # bleed / echo doesn't open a fake turn.
 VAD_FRAME_MS = 20                     # webrtcvad accepts 10/20/30 ms frames
+# Which VAD labels each frame voice / not-voice. webrtcvad is a signal-
+# processing heuristic that calls a keystroke, a chair scrape and a door voice
+# -- it was built to detect "is anyone on this call", not "is this a human".
+# Silero is a small RNN, shipped inside sherpa-onnx (already a dependency for
+# the wake word), and it declines to open on most non-speech.
+#
+# Measured 2026-09-28 on 50 spoken windows (30 SHORT questions, 10 medium, 10
+# long) and 50 windows of room noise with no voice at all, replaying this same
+# endpoint():
+#
+#             short  med  long   ALL   noise reaching the cloud
+#   webrtcvad 30/30   10    10  50/50        33/50
+#   silero    30/30   10    10  50/50        13/50
+#
+# Same recall, 60% less noise. Costs RTF 0.100 on the Pi against webrtcvad's
+# 0.0011 -- 90x more, still a tenth of one core, and the wake spotter is not
+# running during a conversation turn.
+#
+# Known cost: on the older q2 corpus Silero keeps 8/12 where webrtcvad keeps
+# 11/12. 12 questions from September against 50 current ones that show no loss;
+# revisit if short questions start being dropped in real use.
+#
+# The gate below is deliberately NOT retuned to match. Every setting that
+# tightens MIN_VOICED_RUN_MS past 700 pays for it almost entirely in SHORT
+# questions (30 -> 24 -> 13 of 30) while medium and long stay at 10/10, and
+# short questions are what this device will actually be asked.
+VAD_ENGINE = "silero"                 # "silero" or "webrtcvad"
+SILERO_VAD_MODEL = "/home/weilie/sichuan/models/silero_vad.onnx"
+SILERO_VAD_THRESHOLD = 0.7            # 0.5 gives 21/50 noise through, 0.7 gives 13
 VAD_FRAME_SAMPLES = CONV_RATE_IN * VAD_FRAME_MS // 1000  # 320 samples
 VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * 2                  # int16 mono
 START_VOICED_MS = 120                 # need this much voiced audio to open an utterance
@@ -361,6 +390,54 @@ def record_utterance(stream, vad, silence_timeout_s):
     device and tools/sweep_vad.py share one endpointer -- a sweep against a
     reimplementation measures the reimplementation."""
     return endpoint(stream_frames(stream), vad, silence_timeout_s)
+
+
+class SileroVad:
+    """webrtcvad-compatible shim so endpoint() is untouched by the swap.
+
+    Silero decides on fixed windows (512 samples at 16 kHz); the device feeds
+    20 ms (320-sample) frames. Buffer until a full window is available and hold
+    that verdict for the frames in between, leaving the endpointer's frame grid
+    exactly as webrtcvad saw it.
+    """
+
+    def __init__(self, threshold=SILERO_VAD_THRESHOLD):
+        cfg = VadModelConfig()
+        cfg.silero_vad.model = SILERO_VAD_MODEL
+        cfg.silero_vad.threshold = threshold
+        cfg.sample_rate = CONV_RATE_IN
+        cfg.provider = "cpu"
+        cfg.num_threads = 1
+        self.model = VadModel.create(cfg)
+        self.win = self.model.window_size()
+        self.buf = np.empty(0, dtype=np.float32)
+        self.last = False
+
+    def reset(self):
+        """Called between turns; the model carries state across frames."""
+        self.model.reset()
+        self.buf = np.empty(0, dtype=np.float32)
+        self.last = False
+
+    def is_speech(self, data, rate):
+        s = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        self.buf = np.concatenate([self.buf, s])
+        while len(self.buf) >= self.win:
+            self.last = bool(self.model.is_speech(self.buf[:self.win].tolist()))
+            self.buf = self.buf[self.win:]
+        return self.last
+
+
+def build_vad():
+    """The frame-level voice detector. Falls back to webrtcvad if the Silero
+    model is missing -- a stale SD card should degrade the endpointer, not stop
+    the device answering at all."""
+    if VAD_ENGINE == "silero" and os.path.exists(SILERO_VAD_MODEL):
+        return SileroVad()
+    if VAD_ENGINE == "silero":
+        print(f"[vad] {SILERO_VAD_MODEL} missing — falling back to webrtcvad.",
+              flush=True)
+    return webrtcvad.Vad(VAD_AGGRESSIVENESS)
 
 
 def endpoint(frames, vad, silence_timeout_s,
@@ -760,13 +837,15 @@ def converse_session(p, api_key):
     the user keeps producing real speech. Ends on natural silence, or after
     MAX_CONSECUTIVE_DEAD_TURNS turns of noise-only input. Returns when the
     session ends; caller resumes wake-word listening."""
-    vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+    vad = build_vad()
     # Fresh history per session: a new wake word starts a new conversation.
     history = []
     turn = 0
     dead_turns = 0
     while True:
         turn += 1
+        if hasattr(vad, "reset"):
+            vad.reset()
         # The holding-phrase timer fires on its own thread and can still be
         # emitting when a turn ends early (a failed call, a dead turn). Opening
         # input on a half-duplex codec while it plays either raises OSError —
