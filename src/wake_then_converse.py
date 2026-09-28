@@ -243,12 +243,16 @@ VOICE_DEADLINE_S = 30
 # so a 2 s timer announced "let me look that up" on every single turn — including
 # 你好. Only a turn that is actually slow should get the holding phrase.
 FILLER_DELAY_S = 3.5
-FILLER_WAV = "/home/weilie/sichuan/checking.wav"
 MAX_CONSECUTIVE_DEAD_TURNS = 2
 
 # Sichuan-dialect voices on the omni models: Sunny (female), Eric (male).
 # Eric verified against qwen3.5-omni-flash on 2026-09-28 and chosen by ear.
 VOICE = "Eric"
+# Keyed to the voice on purpose. This is synthesised once and kept on disk, and
+# ensure_filler() returns early when the file exists -- so a plain filename
+# meant that switching VOICE left the holding phrase in the OLD voice forever.
+# Observed 2026-09-28: the device greeted in Sunny and answered in Eric.
+FILLER_WAV = f"/home/weilie/sichuan/checking_{VOICE}.wav"
 # Round 2, the voice. 3.5 series: required for enable_search (the 3.0 models
 # have no search at all), and it is the newest series that can still SPEAK —
 # 3.8-Omni-Flash is text-out only.
@@ -569,13 +573,17 @@ def ensure_filler(api_key):
         if not chunks:
             return
         raw = b"".join(base64.b64decode(c) for c in chunks)
+        # Write then rename: the check above is existence-only, so a power cut
+        # part-way through a direct write would cache a truncated file forever.
+        tmp = FILLER_WAV + ".tmp"
         if raw[:4] == b"RIFF":
-            with open(FILLER_WAV, "wb") as f:
+            with open(tmp, "wb") as f:
                 f.write(raw)
         else:
-            with wave.open(FILLER_WAV, "wb") as w:
+            with wave.open(tmp, "wb") as w:
                 w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
                 w.writeframes(raw)
+        os.replace(tmp, FILLER_WAV)
         print("[boot] cached holding phrase.", flush=True)
     except Exception as e:
         print(f"[boot] could not cache holding phrase: {type(e).__name__}: {e}",
