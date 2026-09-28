@@ -2,21 +2,36 @@
 
 ## Read first
 
-- `docs/next-session.md` — active punch list. Current focus: enclosure
-  iteration (v10 is latest; physical fit-test of v10 print + adding
-  ventilation / mic openings / strain-relief still open).
+- `docs/next-session.md` — active punch list. Current focus: re-measure
+  lid-closed wake recall at the beam-16 setting (§0) before spending more
+  print time; the v15c enclosure test print (mic ports in the base walls)
+  is the open enclosure item.
 - `docs/smart-speaker.md` — full roadmap, hardware/software constraints
   we've validated, and non-obvious gotchas (PulseAudio, .bashrc
   key-parsing, ALSA mixer persistence, power-cable dominance).
+- `docs/deployment.md` — the systemd user service on the Pi: install /
+  update commands, env file, persistent journal, gotchas.
 
 ## Repo shape
 
 - `src/converse.py` — press-to-talk, non-realtime path against
   qwen3-omni-flash. Working.
-- `src/chat_omni.py` — realtime WebSocket path. Working on Pi 3 + HAT V2.
-- `src/wake_then_converse.py` — Phase 1 wake + converse integration.
-  Uses sherpa-onnx KWS with wake phrase 麻婆豆腐 (pinyin-tokenised;
-  keyword file at `~/sichuan/models/wake_keywords.txt` on the Pi).
+- `src/chat_omni.py` — realtime WebSocket path. Works on Pi 3 + HAT V2,
+  but the service does not use it, it sends no persona prompt, and it
+  reads only `DASHSCOPE_API_KEY`.
+- `src/wake_then_converse.py` — the deployed daemon: wake word, then a
+  multi-turn conversation (Silero VAD endpointing with a webrtcvad
+  fallback; two-round web-search path). Uses sherpa-onnx KWS with wake
+  phrase 麻婆豆腐 (pinyin-tokenised; keyword file at
+  `~/sichuan/models/wake_keywords.txt` on the Pi). The date sent with
+  search queries is pinned to Asia/Shanghai in code, so the Pi's own
+  timezone does not matter.
+- `src/utils.py`, `src/transcribe.py`, `src/synthesize.py` — ASR / TTS
+  CLIs and the shared API-key setup.
+- `tools/` — measurement scripts (wake / VAD sweeps, corpus recording,
+  `usage-report.sh`). Most import `wake_then_converse` and expect the Pi's
+  `~/sichuan` paths.
+- `deploy/sichuan.service` — the systemd user unit; see `docs/deployment.md`.
 - `enclosure/case.scad` — OpenSCAD source of truth for the enclosure.
   Rendered STLs (`enclosure/base.stl`, `enclosure/lid.stl`) are
   regenerated from this. Iterate: edit `.scad` → `openscad -o

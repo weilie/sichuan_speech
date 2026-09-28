@@ -1,8 +1,9 @@
 # Sichuan Smart Speaker — Roadmap
 
 A standalone, Alexa-style smart speaker that listens and responds in
-Sichuan dialect, built on Raspberry Pi 5 and deployed at the maintainer's
-parents' home, roughly 1000 km away.
+Sichuan dialect, built on a Raspberry Pi 3 (decided 2026-07-02; see
+Phase 1) and deployed at the maintainer's parents' home, roughly 1000 km
+away.
 
 Roadmap, not design. It captures goal, constraints, BOM, enclosure
 considerations, software shape, and phases. It does **not** lock in
@@ -38,12 +39,13 @@ choice below.
 - **Home Wi-Fi.** Parents' SSID and password pre-flashed before
   transport. No enterprise auth.
 - **Inference is cloud-side.** DashScope Qwen Omni. Two transport
-  paths are kept on the table — `qwen3-omni-flash-realtime` over a
-  full-duplex WebSocket (low latency, supports barge-in) and the
-  non-realtime `qwen3-omni-flash` request/response API (simpler,
-  validated end-to-end on Pi 3). v1 decides which one ships, or
-  supports both behind a runtime flag. The Pi only does audio I/O,
-  wake-word, and orchestration — no heavy local ML.
+  paths were built — `qwen3-omni-flash-realtime` over a WebSocket
+  (low latency; barge-in is blocked by the half-duplex HAT codec, see
+  §5.3) and the non-realtime `qwen3-omni-flash` request/response API
+  (simpler, validated end-to-end on Pi 3). The non-realtime path shipped
+  (`wake_then_converse.py`); `chat_omni.py` is not used by the service.
+  The Pi only does audio I/O, wake-word, end-of-speech detection and
+  orchestration — no heavy local ML.
 - **Latency budget.** Conversational. Press-to-talk round-trip
   measured at ~5–6 s on Pi 3 over 2.4 GHz Wi-Fi to Alibaba SG,
   which is borderline acceptable; 5 GHz on Pi 4/5 is expected to
@@ -59,10 +61,10 @@ choice below.
 
 | Item | Notes | ~USD |
 |---|---|---|
-| Raspberry Pi (model TBD) | Decision now gates on the Phase 1 wake-word benchmark on the on-hand Pi 3 (see §6 Phase 1). Phase 0 already showed: 2.4 GHz Wi-Fi is fast enough for the cloud call (5–6 s round-trip), and 1 GB RAM is sufficient for `chat_omni.py` or `converse.py` running alone. The open question is whether continuous wake-word detection fits *alongside* the chat daemon. Pi 4 4 GB ~$100 (CanaKit/PiShop), Pi 5 4 GB ~$130 (Adafruit); Pi 3 is $0 (already on hand). | $0–130 |
+| Raspberry Pi 3 Model B | **Decided 2026-07-02: the on-hand Pi 3 ships** (see §6 Phase 1); the Pi 4/5 analysis below is kept for reference. Phase 0 already showed: 2.4 GHz Wi-Fi is fast enough for the cloud call (5–6 s round-trip), and 1 GB RAM is sufficient for `chat_omni.py` or `converse.py` running alone. The open question then, whether continuous wake-word detection fits *alongside* the chat daemon, was answered yes. Pi 4 4 GB ~$100 (CanaKit/PiShop), Pi 5 4 GB ~$130 (Adafruit); Pi 3 is $0 (already on hand). | $0–130 |
 | Official USB-C PSU | Pi 5 needs the 27 W official PSU; Pi 4 is happy with any ~15 W USB-C. Off-brand chargers cause undervoltage. | $8–12 |
 | Active cooler | Pi 5: official Active Cooler. Pi 4: heatsink + small fan. Without it the Pi throttles under sustained load. | $5 |
-| ReSpeaker 2-Mics Pi HAT (genuine Seeed) | Dual mics, WM8960 codec, JST speaker connector. The HAT's button and 3 RGB LEDs are left unused. Ordered 2026-06-13 from Amazon (B07CXSW6LB). Cheaper KEYESTUDIO clones exist (~$12) but the genuine board has better driver/community support. Compatible with Pi 3, 4, and 5. | $40 |
+| ReSpeaker 2-Mics Pi HAT (genuine Seeed) | Dual mics, JST speaker connector (the listing says WM8960; the codec is actually a TI TLV320AIC3104). The HAT's button and 3 RGB LEDs are left unused. Ordered 2026-06-13 from Amazon (B07CXSW6LB). Cheaper KEYESTUDIO clones exist (~$12) but the genuine board has better driver/community support. Compatible with Pi 3, 4, and 5. | $40 |
 | USB SSD 128 GB (preferred) **or** A2 high-endurance microSD 64 GB | SSD is far more reliable for 24/7 operation. SD cards are the #1 failure mode for always-on Pi deployments. Pi 5 boots from USB 3.0 SSD or NVMe (with adapter HAT); Pi 4 boots from USB 3.0 SSD. | $20 / $12 |
 | Full-range speaker driver, 3 W / 4 Ω | Ordered the Dayton Audio DMA45-4 (1½", aluminum cone) from Amazon (B07N1YW3SV). This is a substitute for the originally spec'd Dayton CE32A-4 (1¼", paper cone, Parts Express SKU 295-356 at ~$6), which would have cost more once Parts Express's flat $9.95 shipping is included. | $17 |
 
@@ -71,7 +73,7 @@ choice below.
 ### Maintainer-supplied
 - Raspberry Pi 3 Model B v1.2 on hand — used as the Phase 0 bench. Not shipped to parents; limits to remember are 1 GB RAM, 2.4 GHz-only Wi-Fi, and onboard Bluetooth that can't do HFP reliably.
 - 3D-printed enclosure (designed and printed at home).
-- USB-C cable for power.
+- Power supply and a short, thick micro-USB cable (Pi 3; cable quality matters more than the brick, see the Phase 1 gotchas).
 - A laptop, used once, to flash the SD/SSD with Raspberry Pi Imager.
 
 ### Explicitly not needed
@@ -107,8 +109,12 @@ choice below.
 
 ### 5.1 Current state
 
-Two CLI tools exist, both in `src/`:
+Three programs matter in `src/`:
 
+- `wake_then_converse.py` — **the deployed daemon.** Wake word
+  (sherpa-onnx), on-device end-of-speech detection (Silero VAD),
+  multi-turn conversation within a session, and the two-round search
+  path (§5.1a), run as a systemd user service (`docs/deployment.md`).
 - `converse.py` — **press-to-talk, validated.** Records a fixed
   window, sends it to `qwen3-omni-flash` as a streaming request,
   plays the response. Confirmed end-to-end on Pi 3 + ReSpeaker
@@ -121,9 +127,9 @@ Two CLI tools exist, both in `src/`:
   output concurrently. Multi-turn Sichuan dialect conversation
   reproduced on the bench Pi 3.
 
-Neither is yet a daemon. Neither has wake-word detection, on-
-device end-of-speech detection, persistent multi-turn memory
-across sessions, or a reliability layer.
+The last two have none of the daemon's machinery. Cross-session
+memory, health alerting and the rest of the reliability layer (§5.3)
+are still open.
 
 ### 5.1a Web search: the two-round path (2026-09-19)
 
@@ -195,7 +201,7 @@ gracefully. Note the model id is `qwen3.8-omni-flash`; the
 ```
                 ┌──────────────────────────────┐
                 │  systemd service             │
-                │  Restart=always               │
+                │  Restart=on-failure           │
                 └──────────────┬───────────────┘
                                │
                                ▼
@@ -230,18 +236,18 @@ a maintainer-controlled endpoint.
   chosen in Phase 1. Pi 3 RAM (1 GB) may rule out heavier libraries —
   this is part of the Pi 4/5 decision.
 
-- **End-of-speech detection.** Press-to-talk currently uses a fixed
-  5 s window. v1 needs "stop when user pauses" so utterances are not
-  truncated and silences are not wasted. Realtime path gets this
-  for free from server-side VAD; press-to-talk needs an on-device
-  VAD (WebRTC VAD or similar).
+- **End-of-speech detection.** Landed: `wake_then_converse.py` stops
+  when the user pauses, using an on-device VAD (Silero, with webrtcvad
+  as fallback). `converse.py` still uses a fixed 5 s window. The
+  realtime path gets this from server-side VAD.
 
 - **Multi-turn memory within a conversation.** The bot should
   remember "what we were just talking about" across two or three
   follow-up turns. Realtime path: server keeps state per session.
   Press-to-talk path: client sends prior `messages` array each turn,
-  capped at a small history window. Required for v1; do not confuse
-  with cross-conversation memory which is out of scope.
+  capped at a small history window (3 exchanges in
+  `wake_then_converse.py`). Do not confuse with cross-conversation
+  memory, which is out of scope.
 
 - **HAT codec is half-duplex.** Reproduced in isolation: when
   PyAudio holds the mic open, output through any path (PyAudio,
@@ -272,9 +278,12 @@ a maintainer-controlled endpoint.
   we additionally need software AEC depends on what real hardware
   in the enclosure actually does — a Phase 1 finding.
 
-- **Reliability.** `systemd` with restart and network-online deps;
-  clean WebSocket reconnect; log size caps; SSD boot if used. Daemon
-  waits for `systemd-timesyncd` before opening WSS — after a power
+- **Reliability.** `systemd` user service with restart, and a
+  persistent, size-capped journal (both landed; `network-online`
+  ordering is a no-op in a user unit, see `docs/deployment.md`). Still
+  open: clean reconnect after network blips, detecting a hung (not
+  crashed) process, SSD boot if used. The daemon should also wait for
+  `systemd-timesyncd` before opening a TLS connection — after a power
   outage the clock is wrong, which silently breaks TLS.
 
 - **Remote access.** Tailscale installed and authenticated at the
@@ -342,7 +351,7 @@ interaction):
   encoded as pinyin tokens in a keywords file; swapping to another
   Chinese phrase is a one-line change after re-tokenising via
   `sherpa_onnx.text2token`. Detail in `docs/next-session.md` §1.
-- ⬜ **Pi 3 vs Pi 4 gating benchmark.** With the chosen wake-word
+- ✅ **Pi 3 vs Pi 4 gating benchmark.** With the chosen wake-word
   library running continuously *alongside* `chat_omni.py`, soak
   for ≥30 min on the bench Pi 3 and measure:
    - `free -m`: working set stays under ~750 MB (≤80% of 1 GB).
@@ -421,58 +430,63 @@ interaction):
      Line 100 %, HP DAC 0 % (muted) survives reboot. HP muted
      eliminates any accidental audio to a 3.5 mm jack; all
      playback goes through the HAT speaker terminals.
-- ✅ End-of-speech detection for the press-to-talk path (WebRTC VAD
-  on-device). Replaces the fixed 5 s window in `wake_then_converse.py`.
-  Landed 2026-07-17. Turn-taking + session-boundary logic:
+- ✅ End-of-speech detection for the press-to-talk path (on-device VAD).
+  Replaces the fixed 5 s window in `wake_then_converse.py`. Landed
+  2026-07-17 with webrtcvad; swapped to Silero 2026-09-28, webrtcvad kept
+  as the fallback. Turn-taking + session-boundary logic:
   - **Utterance:** 20 ms VAD frames, 300 ms pre-speech ring buffer,
-    120 ms voiced-onset threshold, 800 ms trailing-silence close,
-    30 s hard cap per utterance.
+    120 ms voiced-onset threshold, 1400 ms trailing-silence close
+    (800 ms until 2026-09-19), 30 s hard cap per utterance.
   - **Session:** after wake beep, keep listening for follow-ups
     with no arbitrary turn or wall-clock cap. Silence timeout is
     adaptive — 8 s on turn 1, 6 s on follow-ups, 2.5 s after a
     dead turn.
   - **Noise guardrail:** a "dead turn" is any turn where the
-    capture was < 400 ms (local reject, no cloud call) or the
-    cloud returned no audio. Two consecutive dead turns end the
+    capture was < 400 ms or had no speech-like voicing (local
+    reject, no cloud call), or the cloud returned no audio. Two consecutive dead turns end the
     session. Any successful reply zeros the counter and relaxes
     the silence window. Effect: real conversations run unbounded;
     a noisy room burns at most 2 cloud calls.
   - Only applies to the press-to-talk (`wake_then_converse.py`)
     path. Realtime path gets end-of-speech from server-side VAD.
-- ⬜ Multi-turn conversation memory within a session. Both paths.
-  (Currently every turn sends only the system prompt + current
-  audio; no history is passed between turns.)
-- ⬜ Decide which transport (or both) ships in v1. Realtime gives
-  ~1–2 s lower time-to-first-audio and free server-side VAD, at the
-  cost of a fragile WebSocket lifecycle and the codec hand-off
-  complexity. Press-to-talk is simpler but needs client-side VAD
-  for end-of-speech detection.
+- ✅ Multi-turn conversation memory within a session (commit
+  `41d81d2`). The press-to-talk path replays the last 3 exchanges,
+  audio included; the realtime path keeps state server-side.
+- ✅ Transport: the non-realtime request/response path ships
+  (`wake_then_converse.py`). Realtime would give ~1–2 s lower
+  time-to-first-audio, at the cost of a fragile WebSocket lifecycle
+  and the codec hand-off; `chat_omni.py` is kept as a reference and
+  the service does not use it.
 - ✅ Daemon shape: wake → record/stream → reply → follow-up window →
   idle. Follow-up window landed 2026-07-17; systemd user service
   with auto-restart landed 2026-07-19. See `docs/deployment.md`.
-  Still open: cleaner reconnect on network blips and log caps.
+  Still open: cleaner reconnect on network blips. Journal caps landed
+  2026-09-19.
 
 Device-shape work (makes it deployable to parents):
 - ⬜ Record audio cues and ship as WAV assets.
 - ⬜ Echo handling: at minimum gate the wake-word detector during bot
   speech. Decide on additional AEC after measuring on real hardware
   in the enclosure.
-- ⬜ Cost protection: Alibaba console hard caps + on-device usage
-  limits with a graceful degraded mode.
-- ⬜ Reliability layer: systemd unit, time-sync wait before any cloud
-  call, log caps, SSD boot if used.
+- 🟨 Cost protection: a workspace-scoped API key plus
+  `tools/usage-report.sh` landed (`4fef894`). Still open: Alibaba console
+  hard caps and on-device usage limits with a graceful degraded mode.
+- 🟨 Reliability layer: systemd unit (2026-07-19) and persistent, capped
+  journal (2026-09-19) landed. Open: time-sync wait before any cloud call,
+  detecting a hung (not crashed) process, SSD boot if used.
 - ⬜ Remote access: Tailscale + fallback hotspot SSID + parents' Wi-Fi
   pre-flashed before transport.
 - ⬜ Health alerting: heartbeat endpoint, daemon posts to it,
   missing-heartbeat alert to maintainer's phone.
-- 🟨 3D-printed enclosure. Design in `enclosure/case.scad` (v10 as
-  of 2026-07-06): 99×99×47 mm square base + 103×103×32 mm lid,
-  snap-fit, Pi rotated 90° for long-axis vertical fit, 36 mm
-  DMA45-4 speaker screw pattern, grille + mic openings + LED
-  viewing hole + cable grommet. **Still open:** physical fit-test
-  of v10 print, and adding ventilation slots / internal cable
-  strain-relief boss / verified mic-opening positions. See
-  `docs/next-session.md` §2.
+- 🟨 3D-printed enclosure. Design in `enclosure/case.scad` (v15c as
+  of 2026-09-21): 99×99×47 mm square base + 103×103×33 mm lid,
+  snap-fit, Pi rotated 90° for long-axis vertical fit, front-mounted
+  DMA45-4 speaker (36 mm screw pattern), cable grommet, LED side slit.
+  The v14 print fit-tested cleanly (2026-07-19). **Still open:** the
+  v15c test print, with oversized mic ports in the base walls, to see
+  whether it recovers the lid-closed wake penalty (re-measure that
+  penalty at the current beam width first), and an internal cable
+  strain-relief boss. See `docs/next-session.md` §0 and §2.
 - ⬜ Multi-week soak at maintainer's home, including forced Wi-Fi
   outage, unclean shutdown, and cloud-session kill. Verify recovery
   and that health alerts fire.
@@ -504,7 +518,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-07-19 (systemd user service for auto-start + auto-restart landed; enclosure v14: uniform Ø3 mm speaker mounts, Ø12 mm cable grommet, LED viewing slit on -Y wall)
+- Last updated: 2026-09-28 (status brought in line with the code: Silero VAD, two-round search, in-session memory, systemd service and persistent journal, enclosure v15c; earlier: 2026-07-19 systemd user service, enclosure v14)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that

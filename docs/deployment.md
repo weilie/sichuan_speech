@@ -13,10 +13,26 @@ is masked (see `docs/smart-speaker.md §5` for the codec / PulseAudio
 notes).
 
 ```bash
-# In the venv
-~/sichuan/.venv/bin/pip install -r ~/sichuan/requirements.txt
+# In the venv. requirements.txt does not list numpy or sherpa-onnx yet.
+~/sichuan/.venv/bin/pip install -r ~/sichuan/requirements.txt numpy sherpa-onnx
 # webrtcvad needs the legacy pkg_resources shim; setuptools ≥81 drops it
 ~/sichuan/.venv/bin/pip install "setuptools<81"
+```
+
+Models, in `~/sichuan/models/` (paths are constants at the top of
+`wake_then_converse.py`):
+
+```bash
+cd ~/sichuan/models
+# Wake-word model. Extract it here; the service reads the dir by name.
+curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+# End-of-speech VAD. If it is missing the service still starts but silently
+# falls back to webrtcvad, logged as "[vad] ... missing" -- and noise reaches
+# the cloud about 2.5x as often.
+curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+# Also needed: wake_keywords.txt (pinyin tokens for 麻婆豆腐; see
+# docs/next-session.md §1).
 ```
 
 ## Install / update the service
@@ -33,11 +49,15 @@ ssh weilie@sichuan-pi.local 'systemctl --user daemon-reload && systemctl --user 
 
 ```bash
 # 1. API key → env file (mode 600). Uses the same eval-based extraction
-#    that avoids the ~/.bashrc trailing-comment gotcha.
+#    that avoids the ~/.bashrc trailing-comment gotcha. Writes whichever of
+#    SICHUAN_DASHSCOPE_API_KEY (preferred: the workspace-scoped key) and
+#    DASHSCOPE_API_KEY (shared fallback) is in ~/.bashrc, under its own name.
 mkdir -p ~/.config/sichuan
 umask 077
-eval $(grep '^export DASHSCOPE_API_KEY=' ~/.bashrc | tail -1)
-printf 'DASHSCOPE_API_KEY=%s\n' "$DASHSCOPE_API_KEY" > ~/.config/sichuan/env
+eval "$(grep -E '^export (SICHUAN_)?DASHSCOPE_API_KEY=' ~/.bashrc)"
+for k in SICHUAN_DASHSCOPE_API_KEY DASHSCOPE_API_KEY; do
+  [ -n "${!k}" ] && printf '%s=%s\n' "$k" "${!k}"
+done > ~/.config/sichuan/env
 chmod 600 ~/.config/sichuan/env
 
 # 2. Enable user linger so the service starts at boot without SSH login
@@ -124,7 +144,14 @@ remote diagnosis starts from zero.
 - **PulseAudio startup noise in the journal is expected.** ALSA
   probes non-existent devices, JACK isn't installed, PulseAudio is
   masked. All harmless. Wait for `[ready] LISTENING…`.
-- **`After=network-online.target`** is important: first cloud call
-  will 500 if it fires before DHCP/DNS settle.
+- **`After=network-online.target` does nothing in a user unit.** The user
+  manager has no such target (`systemctl --user status network-online.target`
+  says "could not be found"), so the service can start before Wi-Fi is up.
+  That is harmless today: the first cloud call happens on the first wake, and
+  the only boot-time network call, `ensure_filler`, is skipped once the
+  holding phrase is cached. Revisit if boot ever needs the network.
+- **The Pi's timezone does not matter to the search date.** The date sent
+  with search queries is pinned to `DEVICE_TZ` (Asia/Shanghai) in code. The Pi
+  itself is set to America/New_York, which is fine.
 - **Restart=on-failure, RestartSec=5** — a hung `KeyboardInterrupt`
   exits cleanly and won't restart; a real crash restarts in 5 s.
