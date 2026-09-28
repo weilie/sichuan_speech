@@ -5,9 +5,13 @@ import dashscope
 def setup_dashscope():
     """Initializes DashScope endpoint and returns the API key."""
     dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
-    api_key = os.getenv("DASHSCOPE_API_KEY")
+    # Prefer the workspace-scoped key so this project's Model Studio spend is
+    # its own line on the bill; fall back to the shared one.
+    api_key = (os.getenv("SICHUAN_DASHSCOPE_API_KEY")
+               or os.getenv("DASHSCOPE_API_KEY"))
     if not api_key:
-        sys.exit("Error: DASHSCOPE_API_KEY environment variable not set.")
+        sys.exit("Error: neither SICHUAN_DASHSCOPE_API_KEY nor "
+                 "DASHSCOPE_API_KEY is set.")
     return api_key
 
 def handle_api_response(response, error_msg):

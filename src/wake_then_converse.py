@@ -994,9 +994,19 @@ def build_kws(keywords_score=KWS_SCORE, keywords_threshold=KWS_THRESHOLD):
 
 
 def main():
-    api_key = os.getenv("DASHSCOPE_API_KEY")
+    # Alibaba bills Model Studio per WORKSPACE, not per key, so a key created
+    # in the shared workspace is indistinguishable from every other Qwen call
+    # on the account. A key made inside a workspace of its own gives this
+    # device its own line on the bill -- see tools/usage-report.sh.
+    # Falls back to the shared key so the device keeps working before the
+    # switch, and on any Pi whose ~/.bashrc has not been updated yet.
+    api_key = (os.getenv("SICHUAN_DASHSCOPE_API_KEY")
+               or os.getenv("DASHSCOPE_API_KEY"))
     if not api_key:
-        sys.exit("DASHSCOPE_API_KEY not set")
+        sys.exit("neither SICHUAN_DASHSCOPE_API_KEY nor DASHSCOPE_API_KEY is set")
+    if not os.getenv("SICHUAN_DASHSCOPE_API_KEY"):
+        print("[boot] using the shared DASHSCOPE_API_KEY — this device's spend "
+              "is not separable on the bill.", flush=True)
 
     make_beep("/tmp/ack.wav")
     set_capture_gain()

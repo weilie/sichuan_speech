@@ -62,15 +62,27 @@ Interpretation of `vcgencmd get_throttled`:
   before running any load test.
 
 The venv on the Pi is `~/sichuan/.venv/` (activate with
-`source ~/sichuan/.venv/bin/activate`). DASHSCOPE_API_KEY lives in
+`source ~/sichuan/.venv/bin/activate`). The API key lives in
 `~/.bashrc` with a trailing comment. To load it non-interactively
 (nohup, systemd, etc.):
 
 ```
-eval $(grep '^export DASHSCOPE_API_KEY=' ~/.bashrc | tail -1)
+eval $(grep -E '^export (SICHUAN_)?DASHSCOPE_API_KEY=' ~/.bashrc | tail -1)
 ```
 NOT `cut -d= -f2` — that grabs the trailing comment as part of the
 key and DashScope rejects it with 401.
+
+The code prefers `SICHUAN_DASHSCOPE_API_KEY` and falls back to
+`DASHSCOPE_API_KEY`, logging `[boot] using the shared
+DASHSCOPE_API_KEY` when it does. Alibaba bills Model Studio per
+WORKSPACE, not per key, so only a key created inside its own
+workspace gives this device a separate line on the bill —
+`tools/usage-report.sh` groups spend that way.
+
+Also: the DashScope SDK must be pointed at the international
+endpoint (`dashscope.base_http_api_url =
+"https://dashscope-intl.aliyuncs.com/api/v1"`) or a valid key comes
+back as `Invalid API-key provided`.
 
 ## Conventions
 
