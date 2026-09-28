@@ -66,10 +66,10 @@ echo "== Device, from the Pi's journal (live, no billing lag)"
 ssh -o ConnectTimeout=8 "$PI" '
   journalctl --user -u sichuan.service --since "'"${CYCLE}"'-01" --no-pager 2>/dev/null |
   awk "
-    /\[turn\] .* sources\./ { turns++; if (\$0 !~ /0 sources/) searched++ }
-    /\[session\].*ending/   { sessions++ }
+    /\[turn\] .* sources\./ { turns++; if (\$0 !~ /, 0 sources/) searched++ }
+    /\[session\] done/      { sessions++ }
     /treating as noise/     { dead++ }
     END {
       printf \"  cloud turns: %d\n  of which searched: %d\n\", turns, searched
-      printf \"  sessions ended: %d\n  turns rejected as noise (no cloud call): %d\n\", sessions, dead
+      printf \"  sessions: %d\n  turns rejected as noise (no cloud call): %d\n\", sessions, dead
     }"' 2>/dev/null || echo "  (Pi unreachable)"
