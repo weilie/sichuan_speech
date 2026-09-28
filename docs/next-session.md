@@ -54,39 +54,54 @@ identical on-device), so a 30-cell grid is 74 s rather than an hour.
 Sample size is the whole story: at n=10 windows the same condition measured
 14% and 40% ten minutes apart. Do not trust n<50.
 
-## 0a. Open: the endpointer answers to typing (2026-09-28, IN PROGRESS)
+## 0a. Endpointer — DONE 2026-09-28, confirmed in live use
 
-Symptom, from real use: after the user stops talking the session stays open,
-the endpointer captures keyboard noise, and the cloud answers it out loud.
+The device answered room noise out loud. With webrtcvad, **33 of 50 windows in
+which nobody spoke** produced a capture that survived the noise gate and
+reached the cloud. Fixed in `c6469cd` by swapping the VAD to Silero (already
+shipped inside sherpa-onnx for the wake word):
 
-Two hypotheses tested and BOTH REJECTED:
+```
+            short  med  long   ALL   noise reaching the cloud
+  webrtcvad 30/30   10    10  50/50        33/50
+  silero    30/30   10    10  50/50        13/50
+```
 
-1. **Silero VAD instead of webrtcvad.** sherpa-onnx already ships it
-   (`VadModelConfig.silero_vad`, model at `models/silero_vad.onnx` on the Pi).
-   Measured worse on both axes via `tools/vad_compare.py`: 13 noise captures
-   surviving vs webrtcvad's 9, question recall 20/24 vs 22/24, and q2 captures
-   truncating to a 520 ms median of speech against 2440 ms. TEN VAD is also
-   exposed by the same config and remains untried.
-2. **Tightening the post-capture gate.** `tools/vad_gate_sweep.py` sweeps
-   MIN_VOICED_RUN_MS × MIN_VOICED_RATIO against questions and room audio at
-   once. No setting helps: 9/9 noise captures survive at every threshold that
-   keeps the questions, and tightening only ever costs questions.
+Same recall, short questions included. RTF 0.100 on the Pi vs webrtcvad's
+0.0011 — 90× more, still a tenth of one core, and the wake spotter is idle
+during a conversation turn. Verified live by the user the same day.
 
-**Why: `negatives.wav` never contained the case.** Its 9 captures show voiced
-runs of 0.8-3.0 s at 43-71% voicing, four of them hitting the 30 s cap. That is
-speech — a TV, or the next room — not keystrokes. No voicing statistic
-separates it from a real question, so the gate was being tuned against the
-wrong failure.
+**The gate was deliberately not retuned**, and that is the finding worth
+keeping. The gate scores the longest unbroken voiced run, which is mostly a
+proxy for utterance LENGTH. A first attempt tuned on 10 long sentences chose
+MIN_VOICED_RUN_MS=1200 and scored 10/10 speech with 0/10 noise; cross-checked
+against the older `q2` corpus it kept **3 of 12**. Recall must be reported per
+length bucket and never pooled: past run 700 every setting pays almost entirely
+in SHORT questions (30 → 24 → 13 of 30) while medium and long hold at 10/10.
+`tools/endpoint_tune.py` does this by construction.
 
-**Next: collect the actual data.** 10 beep-paced windows of typing with no
-speech at all, and 10 of real questions for the recall ceiling, both lid-closed
-at the normal position. Then re-run `vad_gate_sweep.py`. A take was started on
-2026-09-28 and abandoned; nothing usable was kept.
+### Residual, in priority order
 
-Worth considering separately: next-room speech and a TV are NOT solvable by
-voicing statistics either, and that is the other half of what `negatives.wav`
-proves. Speaker verification or a much shorter session window may be the only
-answers there.
+- **13/50 noise windows still reach the cloud.** Improved, not solved. Nobody
+  has looked at what those 13 are.
+- **Silero keeps 8/12 of `q2` where webrtcvad kept 11/12.** Judged acceptable —
+  12 September questions against 50 current ones showing no loss — but it is
+  the first thing to suspect if short questions start being ignored in real
+  use.
+- **Next-room speech and a TV are not solvable this way at all.** `negatives.wav`
+  proves it: its 9 captures show voiced runs of 0.8-3.0 s at 43-71% voicing,
+  which is speech and indistinguishable from a real question by any voicing
+  statistic. Speaker verification or a shorter session window are the only
+  candidates.
+- TEN VAD is exposed by the same `VadModelConfig` and was never tried.
+
+### Corpora on the Pi (`~/sichuan/wake_data/`)
+
+- `short1-3` (30 short questions), `med1` (10), `speech1` (10 long) — 50 spoken
+- `nospeech1-5` — 50 windows, room noise, no voice at all
+- `pos1-5` / `neg1-2` — 50 wake utterances + 20 non-wake speech, for the KWS
+- `q`, `q2` — 24 older questions, kept as an independent cross-check
+- `negatives.wav` — 180 s of room audio that turned out to be speech
 
 ## 0. START HERE — the two problems blocking the build (2026-09-19)
 
