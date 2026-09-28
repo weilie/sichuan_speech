@@ -3,10 +3,10 @@
 Originally captured 2026-07-03 with two work streams: Chinese wake
 word (software) and enclosure (hardware). **Wake word done**
 2026-07-04. Enclosure moved from Snips-STL fit-check into our own
-OpenSCAD design (v1 → v10 shipped between 2026-07-03 and
-2026-07-06). Physical fit-test of v10 print and a handful of
-enclosure sub-features are the last open pieces before the parents'
-build.
+OpenSCAD design (v1 → v15c between 2026-07-03 and 2026-09-21; the
+v14 print fit-tested clean on 2026-07-19). The v15c mic-port test
+print is the last open enclosure piece before the parents' build, but
+see §0: re-measure wake recall before printing more.
 
 Also delivered since first capture: Sichuan system-prompt expansion
 (2026-07-08, commit `e699d43`) — grandchild persona, brevity cap,
@@ -103,11 +103,13 @@ in SHORT questions (30 → 24 → 13 of 30) while medium and long hold at 10/10.
 - `q`, `q2` — 24 older questions, kept as an independent cross-check
 - `negatives.wav` — 180 s of room audio that turned out to be speech
 
-## 0. START HERE — the two problems blocking the build (2026-09-19)
+## 0b. The two problems of 2026-09-19 — history, partly superseded
 
-Everything else in this file is context. These two are what actually
-stop the device working in a room it was not hand-tuned for, and they
-are **coupled**: do (1) first, then re-measure (2).
+**Status as of 2026-09-28.** (2) is resolved: webrtcvad was replaced by
+Silero (§0a). (1) is unresolved and its premise is in doubt: every number
+below was taken at beam 4 (§0), so re-measure lid-closed recall at beam 16
+before acting on it. The text stays as the record of what was measured and
+why.
 
 ### (1) The microphones need a hardware change
 
@@ -229,6 +231,11 @@ a wake phrase, not less.
   goes to a log nobody reads, so state the phrase out loud to whoever
   is recording.
 
+Note: `tools/sweep_vad.py` and `tools/vad_gate_sweep.py` build
+`webrtcvad.Vad` directly, so they measure the fallback engine, not the
+shipped Silero one. `tools/endpoint_tune.py` and `tools/vad_compare.py`
+cover Silero.
+
 ## 1. Chinese wake word — DONE 2026-07-04
 
 Full swap from openWakeWord to sherpa-onnx KWS. Wake phrase 麻婆豆腐
@@ -303,57 +310,61 @@ glue-scripting, training, deploying.
 - **Baidu / Alibaba / iFlyTek APIs**: cloud-based (adds latency,
   requires internet per wake) or per-device commercial licensing.
 
-## 2. Enclosure — v10 rendered, physical fit-test of v10 pending
+## 2. Enclosure — v15c current, v10 baseline below
 
 Design source of truth is `enclosure/case.scad` (OpenSCAD).
 Rendered STLs `enclosure/base.stl` and `enclosure/lid.stl` are
-regenerated from it. Iterations 1 → 10 have converged on:
+regenerated from it. Iterations 1 → 10 converged on the list below;
+later changes are marked in italics. The open item is the v15c test
+print (mic ports in the base walls, §0b).
+
 
 - **Base outer 99 × 99 × 47 mm** (truly square, walls 3 mm)
-- **Lid outer 103 × 103 × 32 mm** (overhangs base by 2 mm each side)
+- **Lid outer 103 × 103 × 32 mm** (overhangs base by 2 mm each side;
+  *≈33 mm since v11*)
 - **Pi rotated 90°** inside the case: long axis vertical, GPIO on
   the LEFT wall, port edge on the RIGHT wall, USB stack TOP, SD
   card BOTTOM
 - **~2 mm breathing room** between the Pi and each wall on install
   (was 0.5 mm in v9, was too tight)
 - **Cable grommet on the RIGHT wall**, aligned with the Pi's
-  micro-USB port; big +X chamber for plug + cable slack
+  micro-USB port; big +X chamber for plug + cable slack. *Ø12 mm
+  since v14, so the plug's strain-relief boot passes.*
 - **Speaker mount posts on the lid interior** at 36 mm corner-to-
-  corner (Dayton DMA45-4 flange holes, measured 1 5/12″)
+  corner (Dayton DMA45-4 flange holes, measured 1 5/12″). *v11:
+  front-mounted instead, so the driver's foam gasket seals against the
+  outside of the lid: a Ø40 mm cutout and four bosses underneath.
+  v14: a single Ø3 mm bore per boss.*
 - **Grille** on the lid's top face — hex-packed 2.5 mm holes over a
-  44 mm circle above the driver cone
+  44 mm circle above the driver cone. *Removed in v11.*
 - **Two 3 mm mic openings** on the lid (approximate positions above
-  the HAT V2 mics — still to be verified in a full assembly)
+  the HAT V2 mics). *Still there, still at the old guess: v15b measured
+  the real mic positions ~20 mm away. Fix `mic_holes()` whenever the lid
+  is next touched. The v15 test uses ports in the base walls instead.*
 - **LED viewing hole** in the lid, 5 mm circle above the Pi's
-  PWR + ACT LED corner (for troubleshooting)
+  PWR + ACT LED corner (for troubleshooting). *Removed in v14; now a
+  10×2 mm slit in the -Y wall.*
 - **Snap-fit** — bumps on base long walls, matching recesses on lid
   inner lip. Confirmed to mate cleanly on v1 print.
 
-Commits `a7123fd` (v1) through `eb870ca` (v10) — see `git log
+Commits `a7123fd` (v1) through `25a77e9` (v15c) — see `git log
 enclosure/` for the full iteration history and the rationale for
 each change.
 
 ### Next steps
 
-1. **Print v10 base + lid** and do the fit-check with a Pi 3B v1.2
-   + ReSpeaker HAT V2 + Dayton DMA45-4 + PSU cable. Verify:
-   - Pi drops in with ~2 mm slop on each wall (no scraping).
-   - Micro-USB plug reaches the port through the grommet with cable
-     slack inside.
-   - HAT stacks on GPIO without hitting the lid ceiling.
-   - Speaker mounts to lid interior with 4 × M3 × 10 mm pan-head
-     screws into the plastic posts.
-   - Snap-fit closes cleanly.
-   - LEDs are visible through the lid hole.
-2. **Add still-missing features** to `case.scad`:
-   - **Ventilation slots** in the base side walls (Pi 3B under
-     sustained load has been observed at 58 °C; +10 °C once inside
-     an enclosed box is realistic; slots are cheap insurance).
+1. ~~Print and fit-check~~ **DONE for v14, 2026-07-19**: everything
+   mates, the M3 screws self-tap and hold the speaker, the cable
+   passes the grommet. What is left to print is v15c (§0b).
+2. **Still-missing features** in `case.scad`:
+   - **Ventilation**: the v15 -X wall slots double as vents, but a
+     Pi 3B under sustained load has been seen at 58 °C (+10 °C once
+     enclosed is realistic), so check temperature in the closed case.
    - **Internal cable clamp / strain-relief boss** near the grommet
      so a tug on the external cable doesn't pull on the Pi's
-     micro-USB connector.
-   - **Mic-opening positions** verified against real HAT V2 mic
-     locations (currently a best-guess based on 55 mm spacing).
+     micro-USB connector. Still open.
+   - **Mic-opening positions**: measured for the base ports in v15b;
+     the lid's `mic_holes()` still uses the old guess.
 3. **Aesthetics pass** (v11+): colour choice, texture, finish. Not
    urgent.
 
@@ -379,9 +390,9 @@ Carried over from `docs/smart-speaker.md`:
 
 - **Rotate the DashScope API key.** Still leaked from 2026-06-20,
   still active. Reset button on Alibaba Model Studio's API Key page.
-- ~~End-of-speech VAD~~ **DONE 2026-07-17.** webrtcvad in
-  `wake_then_converse.py`; see §4 below for the turn/session state
-  machine. Fun-ASR-Realtime is still on the table as an eventual
+- ~~End-of-speech VAD~~ **DONE 2026-07-17** with webrtcvad,
+  replaced by Silero on 2026-09-28 (§0a). See §4 below for the
+  turn/session state machine. Fun-ASR-Realtime is still on the table as an eventual
   replacement (dedicated Sichuan accent support, DashScope same-
   platform integration) if webrtcvad accuracy proves inadequate.
 - ~~Multi-turn conversation memory within a session.~~ **DONE**
@@ -400,8 +411,8 @@ Carried over from `docs/smart-speaker.md`:
   "Journal is persistent" in `docs/deployment.md`). Still open:
   cleaner network-blip reconnect.
 - **Residual findings from the 2026-09-19 adversarial review** (the
-  five serious ones are fixed in `src/wake_then_converse.py`; these
-  three were left):
+  five serious ones are fixed in `src/wake_then_converse.py`; of the
+  three that were left, the last is now fixed too):
   - A failed restyle falls through to a *fourth* cloud call, and the
     holding phrase is not re-armed, so the user waits it out in
     silence.
@@ -410,32 +421,40 @@ Carried over from `docs/smart-speaker.md`:
     so a stream stalled mid-read survives; each zombie pins ~5 MB
     (its base64 audio plus a history copy) on a 1 GB Pi until the
     SDK read timeout kills it.
-  - `ensure_filler` writes `checking.wav` non-atomically and
+  - ~~`ensure_filler` writes `checking.wav` non-atomically and
     short-circuits on mere existence, so a power cut mid-write
-    caches a truncated file permanently. Write to a temp path and
-    `os.replace`.
+    caches a truncated file permanently.~~ **Fixed in `1d89ace`**
+    (temp file + `os.replace`; the file is also keyed to the voice).
 - Cost protection (Alibaba console hard caps + on-device usage
-  limits).
+  limits). Partly done: a workspace-scoped key and
+  `tools/usage-report.sh` (`4fef894`); hard caps and on-device limits
+  are still open.
 - Remote access (Tailscale) for post-deployment troubleshooting.
 - Health alerting / heartbeat.
 
 ## 4. Turn-taking + session boundary — DONE 2026-07-17
 
-Landed in `src/wake_then_converse.py`. Uses `webrtcvad` for
-end-of-speech, plus an adaptive session loop that ends only on
+Landed in `src/wake_then_converse.py`. Uses an on-device VAD for
+end-of-speech (webrtcvad at first, Silero since 2026-09-28, with
+webrtcvad as the fallback), plus an adaptive session loop that ends only on
 meaningful signal (silence or repeated noise) rather than
 arbitrary caps.
 
 ### Per-turn (utterance capture)
 
-- 20 ms VAD frames at 16 kHz (`VAD_AGGRESSIVENESS = 2`).
+- 20 ms VAD frames at 16 kHz. Silero decides (threshold 0.7);
+  `VAD_AGGRESSIVENESS = 2` applies only to the webrtcvad fallback.
 - 300 ms pre-speech ring buffer so the onset isn't clipped.
 - Utterance opens after 120 ms of voiced audio.
 - Utterance closes on the FIRST of:
-  - 800 ms of trailing silence, or
+  - 1400 ms of trailing silence (`END_SILENCE_MS`; 800 until
+    2026-09-19), or
   - 30 s hard cap.
 - Sub-400 ms captures are treated as noise: no cloud call, count
   as a dead turn.
+- So are captures without speech-like voicing: longest unbroken voiced
+  run under 300 ms (`MIN_VOICED_RUN_MS`) or voiced ratio under 10%
+  (`MIN_VOICED_RATIO`). Both stats are logged on every turn.
 
 ### Session (multi-turn loop after wake)
 
@@ -460,6 +479,7 @@ Net effect: a noisy room burns at most 2 cloud calls before we
 bail out; a real conversation is never artificially truncated.
 
 Tuning knobs (constants at the top of `wake_then_converse.py`):
-`VAD_AGGRESSIVENESS`, `MIN_UTTERANCE_MS`, `START_VOICED_MS`,
-`END_SILENCE_MS`, `MAX_UTTERANCE_S`, the three silence-timeout
-values, and `MAX_CONSECUTIVE_DEAD_TURNS`.
+`SILERO_VAD_THRESHOLD`, `VAD_AGGRESSIVENESS` (fallback only),
+`MIN_UTTERANCE_MS`, `MIN_VOICED_RUN_MS`, `MIN_VOICED_RATIO`,
+`START_VOICED_MS`, `END_SILENCE_MS`, `MAX_UTTERANCE_S`, the three
+silence-timeout values, and `MAX_CONSECUTIVE_DEAD_TURNS`.
