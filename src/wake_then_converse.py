@@ -19,15 +19,18 @@ Prerequisites on Pi:
     extracted at MODEL_DIR (see docs/next-session.md).
   - Custom keywords file at KEYWORDS_FILE with the wake phrase(s)
     encoded as pinyin tokens.
-  - `pip install webrtcvad` for end-of-speech detection.
+  - silero_vad.onnx at SILERO_VAD_MODEL for end-of-speech detection
+    (`pip install webrtcvad` too: it is the fallback engine, and is
+    imported unconditionally).
 """
-import os, sys, time, base64, json, math, struct, wave, subprocess
+import os, sys, time, datetime, base64, json, math, struct, wave, subprocess
 import numpy as np
 import pyaudio
 import dashscope
 import webrtcvad
 import queue
 import threading
+from zoneinfo import ZoneInfo
 from sherpa_onnx import KeywordSpotter, VadModel, VadModelConfig
 
 dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
@@ -48,9 +51,10 @@ WAKE_RATE = 16000
 # utterances + 3 min of room audio): 17/19 recall with ZERO false alarms.
 # The sweep found no false alarm anywhere in the grid, even at the most
 # sensitive corner — precision is simply not the binding constraint here,
-# so sensitivity is set high. Two utterances are missed at every setting;
-# ASR confirms both clearly say 麻婆豆腐, so that residue is a limit of the
-# KWS model, not of this tuning. Re-run the sweep before changing these.
+# so sensitivity is set high. That 17/19 sweep was taken at the default beam
+# width and its two "missed at every setting" utterances turned out to be the
+# beam, not the model (see KWS_MAX_ACTIVE_PATHS below). Re-run the sweep before
+# changing these.
 KWS_SCORE = 4.0
 # Capture gain, applied at every start. This is the highest-impact setting in
 # the whole wake path: replaying the corpus at simulated gains gives 63%
@@ -76,11 +80,10 @@ KWS_THRESHOLD = 0.05
 # RTF 0.349 at beam 4 vs 0.360 at beam 16 — the zipformer encoder dominates
 # and the beam search is rounding error next to it.
 KWS_MAX_ACTIVE_PATHS = 16
-# Off since the live detector was tuned to 4.0/0.05: there is no meaningfully
-# looser setting left to compare against (the sweep shows 5.0/0.02 catches
-# FEWER utterances, not more), so the watcher can no longer tell us anything
-# and its second decode thread is pure cost. Flip back on only if the live
-# tuning is loosened again.
+# Off: the live detector sits at 4.0/0.05 and score/threshold are nearly flat
+# next to beam width, so the watcher has not told us anything since, and its
+# second decode thread is pure cost. Flip back on only if the live tuning is
+# loosened again.
 NEARMISS_LOGGING = False
 NEARMISS_SCORE = 2.5
 NEARMISS_THRESHOLD = 0.10
@@ -214,9 +217,11 @@ RESEARCH_MAX_TOKENS = 160
 #
 # The date is included because "明天" is meaningless without it — without the
 # date the model dated tomorrow inconsistently (周五 in one reply, 周六 in the
-# next). It comes from the Pi's clock, so the Pi's timezone must match where
-# the device physically sits, not where it was set up.
+# next). It is computed in DEVICE_TZ, NOT read from the Pi's own timezone: the
+# Pi was set up on America/New_York, 12 h behind Chengdu, which made "今天" the
+# wrong date for half of every day. Change the two together if the device moves.
 DEVICE_LOCATION = "四川成都"
+DEVICE_TZ = "Asia/Shanghai"
 # Round 2 is launched at the same moment as round 1, on the bet that this turn
 # needs no search. See SpeculativeVoice. Set False for strictly serial rounds.
 SPECULATIVE_VOICE = True
@@ -600,6 +605,19 @@ def ensure_filler(api_key):
               flush=True)
 
 
+def device_today():
+    """Today's date where the device SITS, formatted for the research prompt.
+    Falls back to the Pi's own clock if tzdata is missing rather than losing
+    the turn -- and says so, since a wrong date is a quiet failure."""
+    try:
+        now = datetime.datetime.now(ZoneInfo(DEVICE_TZ))
+    except Exception as e:
+        print(f"[research] no tz data for {DEVICE_TZ} ({type(e).__name__}) — "
+              f"using the Pi's local date.", flush=True)
+        now = datetime.datetime.now()
+    return now.strftime("%Y年%m月%d日")
+
+
 def research_pass(audio_b64, api_key, on_search=None):
     """Round 1: raw audio in, facts out. No system prompt, no instructions —
     see RESEARCH_MAX_TOKENS. Returns (facts_text, n_sources); facts_text is
@@ -617,7 +635,7 @@ def research_pass(audio_b64, api_key, on_search=None):
             messages=[{"role": "user", "content": [
                 {"audio": f"data:audio/wav;base64,{audio_b64}"},
                 {"text": f"（我在{DEVICE_LOCATION}，今天是"
-                         f"{time.strftime('%Y年%m月%d日')}）"}]}],
+                         f"{device_today()}）"}]}],
             modalities=["text"],
             enable_search=True,
             search_options={"search_strategy": "agent", "enable_source": True},
