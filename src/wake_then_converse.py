@@ -217,7 +217,9 @@ FILLER_DELAY_S = 3.5
 FILLER_WAV = "/home/weilie/sichuan/checking.wav"
 MAX_CONSECUTIVE_DEAD_TURNS = 2
 
-VOICE = "Sunny"
+# Sichuan-dialect voices on the omni models: Sunny (female), Eric (male).
+# Eric verified against qwen3.5-omni-flash on 2026-09-28 and chosen by ear.
+VOICE = "Eric"
 # Round 2, the voice. 3.5 series: required for enable_search (the 3.0 models
 # have no search at all), and it is the newest series that can still SPEAK —
 # 3.8-Omni-Flash is text-out only.
