@@ -40,7 +40,7 @@ def build(score, thresh):
         encoder=f"{MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
         decoder=f"{MODEL_DIR}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
         joiner=f"{MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=KEYWORDS, num_threads=1, max_active_paths=4,
+        keywords_file=KEYWORDS, num_threads=1, max_active_paths=16,
         keywords_score=score, keywords_threshold=thresh,
         num_trailing_blanks=1, provider="cpu")
 

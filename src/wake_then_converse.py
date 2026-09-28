@@ -61,6 +61,21 @@ KWS_SCORE = 4.0
 CAPTURE_CARD = "seeed2micvoicec"
 CAPTURE_PGA = 60          # 30.00 dB on this codec (range 0-119)
 KWS_THRESHOLD = 0.05
+# Beam width for the keyword search. sherpa-onnx defaults to 4 and this stayed
+# at the default for three months, which cost most of the wake path's recall:
+# on a lid-CLOSED corpus of 50 wake utterances plus 20 windows of ordinary
+# speech and household noise (NOT silence — the negatives are the speaker
+# talking and making noise without saying the wake phrase), 4 gives 28/50 and
+# 16 gives 47/50, both rejecting all 20 negatives. The two knobs above
+# are nearly flat by comparison — every score from 3.0 to 5.0 lands on exactly
+# 47/50 at beam 16, and that agreement is why 16 is the safe choice rather
+# than the single best cell (3.0/48 scored 50/50, but its neighbours 4.0/48
+# and 5.0/48 produce 2-3 false accepts, so that cell is corpus luck).
+# Above 16 recall gains ~2 points and false accepts appear, which is the wrong
+# trade for an always-on device. Costs almost nothing: measured on the Pi,
+# RTF 0.349 at beam 4 vs 0.360 at beam 16 — the zipformer encoder dominates
+# and the beam search is rounding error next to it.
+KWS_MAX_ACTIVE_PATHS = 16
 # Off since the live detector was tuned to 4.0/0.05: there is no meaningfully
 # looser setting left to compare against (the sweep shows 5.0/0.02 catches
 # FEWER utterances, not more), so the watcher can no longer tell us anything
@@ -871,7 +886,7 @@ def build_kws(keywords_score=KWS_SCORE, keywords_threshold=KWS_THRESHOLD):
         joiner=f"{KWS_MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
         keywords_file=KWS_KEYWORDS_FILE,
         num_threads=1,
-        max_active_paths=4,
+        max_active_paths=KWS_MAX_ACTIVE_PATHS,
         keywords_score=keywords_score,
         keywords_threshold=keywords_threshold,
         num_trailing_blanks=1,

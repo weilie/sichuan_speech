@@ -36,7 +36,7 @@ def build(score, threshold, model_dir=MODEL_DIR, keywords=KEYWORDS):
         encoder=f"{model_dir}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
         decoder=f"{model_dir}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
         joiner=f"{model_dir}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=keywords, num_threads=2, max_active_paths=4,
+        keywords_file=keywords, num_threads=2, max_active_paths=16,
         keywords_score=score, keywords_threshold=threshold,
         num_trailing_blanks=1, provider="cpu",
     )
