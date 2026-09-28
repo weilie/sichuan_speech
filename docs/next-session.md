@@ -12,6 +12,82 @@ Also delivered since first capture: Sichuan system-prompt expansion
 (2026-07-08, commit `e699d43`) — grandchild persona, brevity cap,
 health/finance safety rails.
 
+## 0. START HERE — 2026-09-28 supersedes most of what follows
+
+**The wake word was never the mics' fault.** `max_active_paths` had sat at
+sherpa-onnx's default of 4 since the July KWS swap. It was never swept, and it
+dominates every knob that was. Measured lid-CLOSED on a 50-utterance corpus:
+
+- beam 4  → 28/50 (56%)
+- beam 8  → 43/50 (86%)
+- beam 16 → 47/50 (94%)
+
+all three with ZERO false accepts against 20 windows of the user talking and
+making noise without saying 麻婆豆腐. Costs 3% CPU on the Pi (RTF 0.349 → 0.360
+at one thread) — the zipformer encoder dominates and the beam search is
+rounding error beside it. Shipped in `c82bdb0`; beam 16 chosen over the single
+best cell because 3.0/4.0/4.5/5.0 all land on exactly 47/50 there, while the
+better-scoring 3.0/48 has neighbours that produce false accepts.
+
+`keywords_score` is nearly flat next to beam width and `keywords_threshold` is
+inert below 0.1. Voice switched Sunny → Eric (male, Sichuan) in `af60310`.
+
+### What this invalidates
+
+Every wake-path measurement this project has made was taken at beam 4 — the
+tools carried the same default. **The 2026-09-19 lid-open vs lid-closed test
+that set the whole enclosure agenda below is one of them.** Lid-closed now runs
+at 94%, so the 7.8 dB penalty may not matter at all. Re-measure before spending
+any more print time on `case.scad`.
+
+Also retired: the "loose thresholds catch fewer utterances" claim and the
+mid-range `score` optimum. Both were artifacts of a 19-window corpus.
+
+### Method that produced this, worth reusing
+
+`tools/blind_windows.py` scores a beep-paced take per window with NON-WAKE
+windows kept in the corpus, so false accepts have a denominator. Ground truth
+stays with the human until the verdicts are read back. Sweeps run on the Mac
+against a copy of the model (~40× faster than the Pi, results verified
+identical on-device), so a 30-cell grid is 74 s rather than an hour.
+
+Sample size is the whole story: at n=10 windows the same condition measured
+14% and 40% ten minutes apart. Do not trust n<50.
+
+## 0a. Open: the endpointer answers to typing (2026-09-28, IN PROGRESS)
+
+Symptom, from real use: after the user stops talking the session stays open,
+the endpointer captures keyboard noise, and the cloud answers it out loud.
+
+Two hypotheses tested and BOTH REJECTED:
+
+1. **Silero VAD instead of webrtcvad.** sherpa-onnx already ships it
+   (`VadModelConfig.silero_vad`, model at `models/silero_vad.onnx` on the Pi).
+   Measured worse on both axes via `tools/vad_compare.py`: 13 noise captures
+   surviving vs webrtcvad's 9, question recall 20/24 vs 22/24, and q2 captures
+   truncating to a 520 ms median of speech against 2440 ms. TEN VAD is also
+   exposed by the same config and remains untried.
+2. **Tightening the post-capture gate.** `tools/vad_gate_sweep.py` sweeps
+   MIN_VOICED_RUN_MS × MIN_VOICED_RATIO against questions and room audio at
+   once. No setting helps: 9/9 noise captures survive at every threshold that
+   keeps the questions, and tightening only ever costs questions.
+
+**Why: `negatives.wav` never contained the case.** Its 9 captures show voiced
+runs of 0.8-3.0 s at 43-71% voicing, four of them hitting the 30 s cap. That is
+speech — a TV, or the next room — not keystrokes. No voicing statistic
+separates it from a real question, so the gate was being tuned against the
+wrong failure.
+
+**Next: collect the actual data.** 10 beep-paced windows of typing with no
+speech at all, and 10 of real questions for the recall ceiling, both lid-closed
+at the normal position. Then re-run `vad_gate_sweep.py`. A take was started on
+2026-09-28 and abandoned; nothing usable was kept.
+
+Worth considering separately: next-room speech and a TV are NOT solvable by
+voicing statistics either, and that is the other half of what `negatives.wav`
+proves. Speaker verification or a much shorter session window may be the only
+answers there.
+
 ## 0. START HERE — the two problems blocking the build (2026-09-19)
 
 Everything else in this file is context. These two are what actually
