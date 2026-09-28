@@ -296,6 +296,16 @@ SICHUAN_SYSTEM_PROMPT = (
     "用你自己的话两三句讲完，不要念资料原文，更不准说“查不到”。"
     "只有在没得资料、又问的是实时的事情时，才老实说“我这儿查不到”，"
     "喊他们看手机或者问屋头的人。任何时候都不准自己编数字。"
+    # Round 2 receives the user's raw audio, not a transcript, so the model can
+    # hear the speaker. Two people live with this device, one man and one
+    # woman, which makes this about the easiest call there is -- but getting it
+    # WRONG is worse than not addressing them at all, hence the explicit out.
+    # If this proves unreliable in use, the real fix is sherpa-onnx speaker
+    # embeddings enrolled per person, not a stronger prompt.
+    "8. 从说话人的声音判断是爷爷还是奶奶在说话：男声就喊“爷爷”，"
+    "女声就喊“奶奶”，回答的时候带上对应的称呼。"
+    "只有听得清楚、很有把握的时候才这样喊；只要有一点拿不准，"
+    "就用“您”，千万不要瞎猜——喊错了比不喊还要伤人。"
 )
 RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
