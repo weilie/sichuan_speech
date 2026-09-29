@@ -148,8 +148,11 @@ remote diagnosis starts from zero.
   manager has no such target (`systemctl --user status network-online.target`
   says "could not be found"), so the service can start before Wi-Fi is up.
   That is harmless today: the first cloud call happens on the first wake, and
-  the only boot-time network call, `ensure_filler`, is skipped once the
-  holding phrase is cached. Revisit if boot ever needs the network.
+  the only boot-time network calls, `ensure_filler`'s one TTS call per
+  holding phrase, are all skipped once those phrases are cached. Note that a
+  wording added to `FILLER_PHRASES` costs one such call on the next boot, so a
+  boot with no network simply leaves that phrase out of the rotation until the
+  next one. Revisit if boot ever needs the network.
 - **The Pi's timezone does not matter to the search date.** The date sent
   with search queries is pinned to `DEVICE_TZ` (Asia/Shanghai) in code. The Pi
   itself is set to America/New_York, which is fine.
