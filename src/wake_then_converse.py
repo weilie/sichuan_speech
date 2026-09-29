@@ -24,6 +24,7 @@ Prerequisites on Pi:
     imported unconditionally).
 """
 import os, sys, time, datetime, base64, json, math, struct, wave, subprocess
+import glob, hashlib, itertools
 import numpy as np
 import pyaudio
 import dashscope
@@ -253,11 +254,36 @@ MAX_CONSECUTIVE_DEAD_TURNS = 2
 # Sichuan-dialect voices on the omni models: Sunny (female), Eric (male).
 # Eric verified against qwen3.5-omni-flash on 2026-09-28 and chosen by ear.
 VOICE = "Eric"
-# Keyed to the voice on purpose. This is synthesised once and kept on disk, and
-# ensure_filler() returns early when the file exists -- so a plain filename
-# meant that switching VOICE left the holding phrase in the OLD voice forever.
-# Observed 2026-09-28: the device greeted in Sunny and answered in Eric.
-FILLER_WAV = f"/home/weilie/sichuan/checking_{VOICE}.wav"
+# A pool, not one line: a turn that needs a search is usually followed by more
+# of them, and hearing the identical recording back three times in a row is
+# what makes a device sound like a machine. Rotated in order, so all of them
+# are heard before any repeats. Keep them short -- this plays while the user is
+# already waiting -- and in dialect, since the voice alone does not choose the
+# words.
+FILLER_PHRASES = [
+    "等哈儿，我帮你查一下哈。",
+    "莫慌哈，我这就去帮你看看。",
+    "稍等哈，我帮你问一下噻。",
+    "等一哈儿，我马上查给你听。",
+]
+FILLER_DIR = "/home/weilie/sichuan"
+
+
+def filler_path(phrase):
+    """Cache filename for one phrase, keyed to the voice AND the text on
+    purpose. These are synthesised once and kept on disk, and ensure_filler()
+    skips any file that already exists -- so a plain filename meant that
+    switching VOICE left the holding phrase in the OLD voice forever (observed
+    2026-09-28: the device greeted in Sunny and answered in Eric), and editing
+    a wording here would likewise have kept playing the old recording."""
+    digest = hashlib.sha256(phrase.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(FILLER_DIR, f"filler_{VOICE}_{digest}.wav")
+
+
+# Filled in by ensure_filler(): the phrases that actually reached the disk.
+# Empty is a supported state -- HoldingPhrase then arms no timer at all.
+FILLER_WAVS = []
+_FILLER_ROTATION = itertools.count()
 # Round 2, the voice. 3.5 series: required for enable_search (the 3.0 models
 # have no search at all), and it is the newest series that can still SPEAK —
 # 3.8-Omni-Flash is text-out only.
@@ -368,7 +394,7 @@ class HoldingPhrase:
     def __init__(self):
         self._cancelled = False
         self._timer = None
-        if os.path.exists(FILLER_WAV):
+        if FILLER_WAVS:
             self._timer = threading.Timer(FILLER_DELAY_S, self._fire)
             self._timer.start()
 
@@ -376,7 +402,11 @@ class HoldingPhrase:
         with AUDIO_LOCK:
             if self._cancelled:
                 return
-            _aplay(FILLER_WAV)
+            # Advance the rotation only when a phrase is actually HEARD. Most
+            # turns arm the timer and then cancel it, so advancing in __init__
+            # would burn entries on silence and let the same wording come up
+            # twice running for the listener. AUDIO_LOCK serialises this.
+            _aplay(FILLER_WAVS[next(_FILLER_ROTATION) % len(FILLER_WAVS)])
 
     def cancel(self):
         self._cancelled = True
@@ -565,44 +595,76 @@ def set_capture_gain():
               f"{type(e).__name__}: {e}", flush=True)
 
 
+def synthesise_phrase(api_key, phrase, path):
+    """Speak one fixed sentence through the omni model and cache it at `path`.
+    The prompt has to forbid embellishment: this is a chat model being used as
+    a synthesiser, and left alone it answers the sentence instead of reading
+    it."""
+    chunks = []
+    for resp in dashscope.MultiModalConversation.call(
+        api_key=api_key, model=MODEL,
+        messages=[{"role": "user", "content": [{"text":
+            f"只念这一句，不要加别的字：{phrase}"}]}],
+        modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
+        result_format="message", stream=True):
+        j = json.loads(str(resp))
+        for ch in (j.get("output") or {}).get("choices", []) or []:
+            for c in ch.get("message", {}).get("content", []):
+                if isinstance(c, dict):
+                    au = c.get("audio")
+                    if isinstance(au, dict) and au.get("data"):
+                        chunks.append(au["data"])
+    if not chunks:
+        return False
+    raw = b"".join(base64.b64decode(c) for c in chunks)
+    # Write then rename: the existence check in ensure_filler() cannot tell a
+    # whole file from a truncated one, so a power cut part-way through a direct
+    # write would cache the truncation forever.
+    tmp = path + ".tmp"
+    if raw[:4] == b"RIFF":
+        with open(tmp, "wb") as f:
+            f.write(raw)
+    else:
+        with wave.open(tmp, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+            w.writeframes(raw)
+    os.replace(tmp, path)
+    return True
+
+
 def ensure_filler(api_key):
-    """Synthesise the 'let me look that up' holding phrase once and keep it
-    on disk. Best-effort: if it fails we simply stay silent while searching."""
-    if os.path.exists(FILLER_WAV):
-        return
-    try:
-        chunks = []
-        for resp in dashscope.MultiModalConversation.call(
-            api_key=api_key, model=MODEL,
-            messages=[{"role": "user", "content": [{"text":
-                "只念这一句，不要加别的字：等哈儿，我帮你查一下哈。"}]}],
-            modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
-            result_format="message", stream=True):
-            j = json.loads(str(resp))
-            for ch in (j.get("output") or {}).get("choices", []) or []:
-                for c in ch.get("message", {}).get("content", []):
-                    if isinstance(c, dict):
-                        au = c.get("audio")
-                        if isinstance(au, dict) and au.get("data"):
-                            chunks.append(au["data"])
-        if not chunks:
-            return
-        raw = b"".join(base64.b64decode(c) for c in chunks)
-        # Write then rename: the check above is existence-only, so a power cut
-        # part-way through a direct write would cache a truncated file forever.
-        tmp = FILLER_WAV + ".tmp"
-        if raw[:4] == b"RIFF":
-            with open(tmp, "wb") as f:
-                f.write(raw)
-        else:
-            with wave.open(tmp, "wb") as w:
-                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
-                w.writeframes(raw)
-        os.replace(tmp, FILLER_WAV)
-        print("[boot] cached holding phrase.", flush=True)
-    except Exception as e:
-        print(f"[boot] could not cache holding phrase: {type(e).__name__}: {e}",
-              flush=True)
+    """Synthesise each holding phrase once and keep it on disk, then publish
+    what landed as the rotation pool. Best-effort per phrase: one failure costs
+    that wording, not the feature, and if none land we simply stay silent while
+    searching. Only the first boot pays for this -- afterwards every file is
+    already cached and this makes no network call at all."""
+    wanted = {filler_path(ph): ph for ph in FILLER_PHRASES}
+    ready = []
+    for path, phrase in wanted.items():
+        if os.path.exists(path):
+            ready.append(path)
+            continue
+        try:
+            if synthesise_phrase(api_key, phrase, path):
+                ready.append(path)
+                print(f"[boot] cached holding phrase: {phrase}", flush=True)
+            else:
+                print(f"[boot] no audio came back for {phrase!r}", flush=True)
+        except Exception as e:
+            print(f"[boot] could not cache {phrase!r}: "
+                  f"{type(e).__name__}: {e}", flush=True)
+    FILLER_WAVS[:] = ready
+    # Wordings edited out of FILLER_PHRASES would otherwise sit on the SD card
+    # forever, one orphan per revision. Safe here: this runs before the wake
+    # loop, so no playback can be holding one of these files.
+    for stale in glob.glob(os.path.join(FILLER_DIR, f"filler_{VOICE}_*.wav")):
+        if stale not in wanted:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    print(f"[boot] {len(FILLER_WAVS)}/{len(wanted)} holding phrases ready.",
+          flush=True)
 
 
 def device_today():
