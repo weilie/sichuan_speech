@@ -114,6 +114,49 @@ class TestResearchGivesUp(unittest.TestCase):
                       watcher.return_value.decided)
 
 
+class TestWatcherSilencesTheFiller(unittest.TestCase):
+    """give_up is only polled when a research chunk arrives, so on a stream that
+    goes quiet the holding phrase would still announce a lookup for a turn that
+    was never a question. The watcher cancels it the moment it decides."""
+
+    def test_a_tag_fires_on_decide(self):
+        fired = []
+        with patch.object(W, "detect_command", return_value="VOLUME_DOWN"):
+            watcher = W.CommandWatcher("Zm9v", "key",
+                                       on_decide=lambda: fired.append(True))
+            self.assertEqual(watcher.result(2), "VOLUME_DOWN")
+        self.assertEqual(fired, [True])
+
+    def test_no_tag_leaves_the_turn_alone(self):
+        fired = []
+        with patch.object(W, "detect_command", return_value=None):
+            watcher = W.CommandWatcher("Zm9v", "key",
+                                       on_decide=lambda: fired.append(True))
+            self.assertIsNone(watcher.result(2))
+        self.assertEqual(fired, [])
+
+    def test_a_raising_callback_does_not_lose_the_tag(self):
+        def boom():
+            raise RuntimeError("aplay gone")
+        with patch.object(W, "detect_command", return_value="VOLUME_UP"):
+            watcher = W.CommandWatcher("Zm9v", "key", on_decide=boom)
+            self.assertEqual(watcher.result(2), "VOLUME_UP")
+
+    def test_the_turn_builds_the_watcher_able_to_silence_the_filler(self):
+        holding = MagicMock()
+        spec = MagicMock()
+        with patch.object(W, "SpeculativeVoice", return_value=spec), \
+             patch.object(W, "HoldingPhrase", return_value=holding), \
+             patch.object(W, "CommandWatcher") as watcher, \
+             patch.object(W, "research_pass", return_value=("", 0)), \
+             patch.object(W, "handle_command", return_value=True):
+            watcher.return_value.result.return_value = "VOLUME_UP"
+            W.cloud_reply(b"\x00\x00" * 800, "key", [])
+            watcher.call_args.kwargs["on_decide"]()
+        holding.cancel.assert_called()
+        spec.abort.assert_called()
+
+
 class TestVolumeCommands(unittest.TestCase):
     def setUp(self):
         self.set = patch.object(W, "apply_volume", return_value=True).start()

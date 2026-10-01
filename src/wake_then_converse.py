@@ -1038,14 +1038,25 @@ class CommandWatcher:
     speculative answer so it adds no wall-clock. result() is what the turn waits on, bounded: a verdict that
     arrives after round 2 has started speaking is no longer actionable."""
 
-    def __init__(self, audio_b64, api_key):
+    def __init__(self, audio_b64, api_key, on_decide=None):
         self.tag = None
+        self._on_decide = on_decide
         self._thread = threading.Thread(
             target=self._run, args=(audio_b64, api_key), daemon=True)
         self._thread.start()
 
     def _run(self, audio_b64, api_key):
         self.tag = detect_command(audio_b64, api_key)
+        # Fire the moment we know, not when the turn gets around to asking.
+        # give_up is only polled when a research chunk ARRIVES, so on a stream
+        # that goes quiet mid-search the holding phrase would otherwise still
+        # announce a lookup for a turn that was never a question.
+        if self.tag is not None and self._on_decide is not None:
+            try:
+                self._on_decide()
+            except Exception as e:
+                print(f"[command] on_decide failed: {type(e).__name__}: {e}",
+                      flush=True)
 
     def decided(self):
         """True once a tag is in hand. Polled from inside round 1's stream so a
@@ -1111,11 +1122,20 @@ def cloud_reply(audio_bytes, api_key, history):
 
     spec = (SpeculativeVoice(audio_b64, history, api_key)
             if SPECULATIVE_VOICE else None)
-    watcher = CommandWatcher(audio_b64, api_key) if COMMAND_DETECTION else None
 
     # The holding phrase only reaches a turn slow enough to mean a real search
-    # is happening: a speculative win cancels it first.
+    # is happening: a speculative win cancels it first, and so does a device
+    # command -- see CommandWatcher's on_decide.
     holding = HoldingPhrase()
+
+    def _on_command():
+        holding.cancel()
+        if spec is not None:
+            spec.abort()
+
+    # Built after `holding` on purpose: it has to be able to silence it.
+    watcher = (CommandWatcher(audio_b64, api_key, on_decide=_on_command)
+               if COMMAND_DETECTION else None)
     # Whether round 1 SEARCHED, tracked separately from whether it SUCCEEDED.
     # on_search kills the speculative call irreversibly, and round 1 can still
     # fail after that point and report 0 sources — which used to send us to
