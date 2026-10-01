@@ -390,8 +390,10 @@ each change.
   t=0 fan-out (text-only, no search, alongside the search and the
   speculative answer) classifies the utterance into `VOLUME_UP` /
   `VOLUME_DOWN` / `REPEAT` / none, and the Pi moves the HAT's `PCM`
-  level itself, acknowledging with a cached spoken phrase. Two things
-  need measuring
+  level itself, acknowledging with a cached spoken phrase. `REPEAT`
+  replays `/tmp/wake_response.wav`, which may be the last answer of an
+  EARLIER session — acceptable, since that is still the last thing the
+  device said. Two things need measuring
   on the device before this is trustworthy: the **false-positive rate**
   against the 2026-09-19 question corpus (a device that turns itself
   down mid-answer is worse than one that ignores the request), and

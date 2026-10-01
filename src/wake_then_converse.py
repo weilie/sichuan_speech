@@ -685,6 +685,9 @@ def synthesise_phrase(api_key, phrase, path):
         messages=[{"role": "user", "content": [{"text":
             f"只念这一句，不要加别的字：{phrase}"}]}],
         modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
+        # Nine of these run before the wake loop on a first boot. Without a
+        # timeout one hung stream keeps the daemon from ever listening.
+        request_timeout=REQUEST_TIMEOUT_S,
         result_format="message", stream=True):
         j = json.loads(str(resp))
         for ch in (j.get("output") or {}).get("choices", []) or []:
@@ -761,7 +764,6 @@ def ensure_filler(api_key):
     FILLER_WAVS[:] = [ready[ph] for ph in FILLER_PHRASES if ph in ready]
 
 
-
 def device_today():
     """Today's date where the device SITS, formatted for the research prompt.
     Falls back to the Pi's own clock if tzdata is missing rather than losing
@@ -775,7 +777,7 @@ def device_today():
     return now.strftime("%Y年%m月%d日")
 
 
-def research_pass(audio_b64, api_key, on_search=None):
+def research_pass(audio_b64, api_key, on_search=None, give_up=None):
     """Round 1: raw audio in, facts out. No system prompt, no instructions —
     see RESEARCH_MAX_TOKENS. Returns (facts_text, n_sources); facts_text is
     "" if the call failed, in which case round 2 answers unaided.
@@ -783,7 +785,13 @@ def research_pass(audio_b64, api_key, on_search=None):
     on_search() fires the moment the stream first reports a non-empty
     search_info. That is the signal that this turn genuinely needed the web,
     and it is what lets the speculative voice call be killed early instead of
-    generating audio nobody will hear."""
+    generating audio nobody will hear.
+
+    give_up() is polled per chunk and abandons the stream when it returns True.
+    It exists for device commands: "音量小一点" is something this round will
+    happily go and SEARCH for, and waiting that out meant the volume moved only
+    after a web round-trip, with the holding phrase announcing a lookup nobody
+    asked for."""
     t0 = time.monotonic()
     parts, n_sources = [], 0
     try:
@@ -799,6 +807,10 @@ def research_pass(audio_b64, api_key, on_search=None):
             max_tokens=RESEARCH_MAX_TOKENS,
             request_timeout=REQUEST_TIMEOUT_S,
             result_format="message", stream=True):
+            if give_up is not None and give_up():
+                print(f"[research] abandoned at {time.monotonic()-t0:.1f}s — "
+                      f"the turn no longer needs facts.", flush=True)
+                return "", 0
             if time.monotonic() - t0 > RESEARCH_DEADLINE_S:
                 print(f"[research] deadline {RESEARCH_DEADLINE_S}s exceeded — "
                       f"going with what arrived ({n_sources} sources).", flush=True)
@@ -1010,10 +1022,13 @@ def detect_command(audio_b64, api_key):
               f"{type(e).__name__}: {e}", flush=True)
         return None
     raw = "".join(parts).strip()
-    # Strip whatever the model wrapped the tag in -- punctuation, a stray
-    # "标签：" -- then require an exact match against the closed set. NONE and
-    # anything chatty both fall through to None.
-    tag = re.sub(r"[^A-Z_]", "", raw.upper())
+    # Strip surrounding punctuation and an optional label ("标签：VOLUME_UP"),
+    # then require the WHOLE remainder to be a tag. Deleting every non-letter
+    # instead would turn any sentence that merely mentions a tag into that tag:
+    # "不是 VOLUME_UP 指令" would have become VOLUME_UP, which is the exact
+    # false positive this call exists to avoid.
+    tag = raw.upper().strip(" \t\r\n。．.!！?？、，,;；:：\"'“”‘’()（）[]【】*`")
+    tag = re.sub(r"^[^A-Z]*[:：]\s*", "", tag)
     print(f"[command] {time.monotonic()-t0:.1f}s -> {raw!r}", flush=True)
     return tag if tag in COMMAND_TAGS else None
 
@@ -1031,6 +1046,11 @@ class CommandWatcher:
 
     def _run(self, audio_b64, api_key):
         self.tag = detect_command(audio_b64, api_key)
+
+    def decided(self):
+        """True once a tag is in hand. Polled from inside round 1's stream so a
+        command does not have to wait out a search it never wanted."""
+        return self.tag is not None
 
     def result(self, timeout):
         self._thread.join(max(0.0, timeout))
@@ -1108,7 +1128,9 @@ def cloud_reply(audio_bytes, api_key, history):
         if spec is not None:
             spec.abort()
 
-    facts, n_sources = research_pass(audio_b64, api_key, on_search=_on_search)
+    facts, n_sources = research_pass(
+        audio_b64, api_key, on_search=_on_search,
+        give_up=(watcher.decided if watcher else None))
     holding.cancel()
 
     # The command verdict settles first, because a command is not a question:

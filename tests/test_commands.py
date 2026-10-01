@@ -58,6 +58,13 @@ class TestCommandParse(unittest.TestCase):
         self.assertEqual(self._tag("VOLUME_DOWN。"), "VOLUME_DOWN")
         self.assertEqual(self._tag(" 标签：VOLUME_UP\n"), "VOLUME_UP")
 
+    def test_a_sentence_that_merely_mentions_a_tag_is_not_a_command(self):
+        # Deleting every non-letter would collapse these into the tag they
+        # mention, which is the false positive the whole prompt guards against.
+        self.assertIsNone(self._tag("不是 VOLUME_UP 指令"))
+        self.assertIsNone(self._tag("音量太大了，输出 VOLUME_DOWN"))
+        self.assertIsNone(self._tag("VOLUME_UP 还是 VOLUME_DOWN"))
+
     def test_none_and_chatter_mean_conversation(self):
         for text in ("NONE", "", "这不是指令", "VOLUME", "SHUTDOWN",
                      "不是指令，所以输出 NONE"):
@@ -72,6 +79,39 @@ class TestCommandParse(unittest.TestCase):
         with patch.object(W.dashscope.MultiModalConversation, "call",
                           side_effect=RuntimeError("socket")):
             self.assertIsNone(W.detect_command("Zm9v", "key"))
+
+
+class TestResearchGivesUp(unittest.TestCase):
+    """A device command must not wait out a search it never wanted: round 1 will
+    happily go and look up "音量小一点"."""
+
+    def _stream(self, chunks=3):
+        payload = {"status_code": 200, "output": {"choices": [
+            {"message": {"content": [{"text": "x"}]}}]}}
+        return [_Chunk(payload) for _ in range(chunks)]
+
+    def test_give_up_abandons_the_stream(self):
+        with patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=self._stream()):
+            self.assertEqual(
+                W.research_pass("Zm9v", "key", give_up=lambda: True), ("", 0))
+
+    def test_without_give_up_the_stream_is_consumed(self):
+        with patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=self._stream()):
+            facts, n = W.research_pass("Zm9v", "key")
+        self.assertEqual((facts, n), ("xxx", 0))
+
+    def test_the_turn_wires_the_watcher_in_as_give_up(self):
+        with patch.object(W, "SpeculativeVoice"), \
+             patch.object(W, "HoldingPhrase"), \
+             patch.object(W, "CommandWatcher") as watcher, \
+             patch.object(W, "research_pass", return_value=("", 0)) as research, \
+             patch.object(W, "handle_command", return_value=True):
+            watcher.return_value.result.return_value = "VOLUME_UP"
+            W.cloud_reply(b"\x00\x00" * 800, "key", [])
+        self.assertIs(research.call_args.kwargs["give_up"],
+                      watcher.return_value.decided)
 
 
 class TestVolumeCommands(unittest.TestCase):
