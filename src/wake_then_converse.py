@@ -327,25 +327,24 @@ COMMAND_PROMPT = (
     "输出 NONE，让聊天照常走。\n"
     "4. 听不清、或者录到的是杂音，输出 NONE。"
 )
-# Beeps, not speech: generated locally by make_beep at boot, so this path needs
-# no network and works on a first boot with the Wi-Fi down. Played AFTER the
-# change lands, so the pitch is heard at the new level and the result is
-# self-evidencing -- the only feedback channel this device has.
+# Spoken, not a beep. A chirp can signal "something happened" but it cannot say
+# 已经是最小声咯, and the difference between "turned it down" and "already at the
+# bottom" is exactly what stops someone asking a third time. These cost nothing
+# at runtime -- same cached-WAV mechanism as the holding phrases -- so the only
+# thing a beep would buy is a first boot with no network, which the fallback in
+# play_ack already covers.
 #
-# A rising chirp means louder and a falling one quieter, which is about as
-# self-explanatory as a sound gets. The same chirp TWICE means the request hit a
-# stop and nothing moved: a single chirp there would sound like success, and
-# they would ask again, hear the same thing, and conclude it is broken.
-BEEP_UP = "/tmp/vol_up.wav"
-BEEP_DOWN = "/tmp/vol_down.wav"
+# Played AFTER the change lands, so they are heard at the new level and the
+# result is self-evidencing. That is the only feedback channel this device has.
 BEEP_ACK = "/tmp/ack.wav"
-ACK_BEEPS = {
-    "up": (BEEP_UP, False),
-    "down": (BEEP_DOWN, False),
-    "at_max": (BEEP_UP, True),
-    "at_min": (BEEP_DOWN, True),
-    "nothing_to_repeat": (BEEP_ACK, True),
+COMMAND_ACKS = {
+    "up": "要得，我说大声点哈。",
+    "down": "要得，我说小声点哈。",
+    "at_max": "已经是最大声咯。",
+    "at_min": "已经是最小声咯。",
+    "nothing_to_repeat": "我刚才还没说啥子喃。",
 }
+ACK_WAVS = {}
 
 # Verified on the Pi 2026-09-30: the HAT (TLV320AIC3104) exposes the DAC volume
 # as PCM, 0-127 in 0.5 dB steps -- 127 is 0 dB and the 108 it ships at is
@@ -744,6 +743,16 @@ def ensure_phrases(api_key, kind, phrases):
     return ready
 
 
+def ensure_acks(api_key):
+    """Cache the command acknowledgements. A missing one falls back to the beep
+    in play_ack, so this failing degrades the feedback rather than the
+    feature."""
+    ready = ensure_phrases(api_key, "ack", list(COMMAND_ACKS.values()))
+    ACK_WAVS.clear()
+    ACK_WAVS.update({key: ready[text] for key, text in COMMAND_ACKS.items()
+                     if text in ready})
+
+
 def ensure_filler(api_key):
     """Publish the holding-phrase rotation pool. Empty is supported: with no
     files HoldingPhrase arms no timer and we simply stay silent while
@@ -1033,14 +1042,15 @@ class CommandWatcher:
 
 
 def play_ack(key):
-    """Chirp the outcome of a command. Silent success is indistinguishable from
+    """Speak the outcome of a command. Silent success is indistinguishable from
     a device that did not hear, and that is what makes someone say it again,
-    louder."""
-    path, twice = ACK_BEEPS[key]
-    ok = play_wav(path)
-    if twice:
-        ok = play_wav(path) and ok
-    return ok
+    louder -- so a phrase that never cached still beeps rather than saying
+    nothing."""
+    path = ACK_WAVS.get(key)
+    if path and os.path.exists(path):
+        return play_wav(path)
+    print(f"[command] no cached ack for {key!r} — beeping instead.", flush=True)
+    return play_wav(BEEP_ACK)
 
 
 def handle_command(tag):
@@ -1338,11 +1348,10 @@ def main():
               "is not separable on the bill.", flush=True)
 
     make_beep(BEEP_ACK)
-    make_beep(BEEP_UP, freq=1180)
-    make_beep(BEEP_DOWN, freq=560)
     set_capture_gain()
     apply_volume(load_volume())
     ensure_filler(api_key)
+    ensure_acks(api_key)
 
     print("[boot] loading sherpa-onnx KeywordSpotter (麻婆豆腐)...", flush=True)
     kws = build_kws()
