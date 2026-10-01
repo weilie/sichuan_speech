@@ -386,6 +386,18 @@ each change.
 
 ## 3. Other open items (context, not urgent this session)
 
+- **Voice volume control — built, unmeasured.** A third call in the
+  t=0 fan-out (text-only, no search, alongside the search and the
+  speculative answer) classifies the utterance into `VOLUME_UP` /
+  `VOLUME_DOWN` / `REPEAT` / none, and the Pi moves the HAT's `PCM`
+  level itself, acknowledging with a chirp. Two things need measuring
+  on the device before this is trustworthy: the **false-positive rate**
+  against the 2026-09-19 question corpus (a device that turns itself
+  down mid-answer is worse than one that ignores the request), and
+  whether 4 dB per step and the 12 dB floor are the right sizes by ear
+  in the parents' room. Also untested by ear: whether a rising versus
+  falling chirp actually reads as louder/quieter to them.
+
 Carried over from `docs/smart-speaker.md`:
 
 - **Rotate the DashScope API key.** Still leaked from 2026-06-20,

@@ -24,7 +24,7 @@ Prerequisites on Pi:
     imported unconditionally).
 """
 import os, sys, time, datetime, base64, json, math, struct, wave, subprocess
-import glob, hashlib, itertools
+import glob, hashlib, itertools, re
 import numpy as np
 import pyaudio
 import dashscope
@@ -266,24 +266,104 @@ FILLER_PHRASES = [
     "稍等哈，我帮你问一下噻。",
     "等一哈儿，我马上查给你听。",
 ]
-FILLER_DIR = "/home/weilie/sichuan"
+PHRASE_DIR = "/home/weilie/sichuan"
 
 
-def filler_path(phrase):
-    """Cache filename for one phrase, keyed to the voice AND the text on
-    purpose. These are synthesised once and kept on disk, and ensure_filler()
+def phrase_path(kind, phrase):
+    """Cache filename for one canned line, keyed to the voice AND the text on
+    purpose. These are synthesised once and kept on disk, and ensure_phrases()
     skips any file that already exists -- so a plain filename meant that
     switching VOICE left the holding phrase in the OLD voice forever (observed
     2026-09-28: the device greeted in Sunny and answered in Eric), and editing
     a wording here would likewise have kept playing the old recording."""
     digest = hashlib.sha256(phrase.encode("utf-8")).hexdigest()[:8]
-    return os.path.join(FILLER_DIR, f"filler_{VOICE}_{digest}.wav")
+    return os.path.join(PHRASE_DIR, f"{kind}_{VOICE}_{digest}.wav")
 
 
 # Filled in by ensure_filler(): the phrases that actually reached the disk.
 # Empty is a supported state -- HoldingPhrase then arms no timer at all.
 FILLER_WAVS = []
 _FILLER_ROTATION = itertools.count()
+
+# ---- Device commands -------------------------------------------------------
+# The third call of the t=0 fan-out, alongside the search and the speculative
+# answer. A separate call, not a tag bolted onto one of those two, for two
+# measured reasons. Round 1 cannot take an instruction at all: any instruction collapses
+# search_results and the model starts inventing numbers (see
+# RESEARCH_MAX_TOKENS). Round 2's text IS its speech, so a tag there would be
+# read out loud -- and on a search turn the round-2 instance holding the user's
+# audio is aborted, so on exactly the turns that search there would be nobody
+# left who heard the command. This runs in PARALLEL with both, so it costs no
+# wall-clock, and it keeps control intent from competing with persona or search
+# for a prompt. Cost is one short text-only call per turn.
+COMMAND_DETECTION = True
+COMMAND_MODEL = "qwen3.5-omni-flash"
+# One tag is 3-4 tokens. The cap is a backstop against a chatty answer, not a
+# budget -- the strict parse already rejects anything that is not a bare tag.
+COMMAND_MAX_TOKENS = 8
+# A command is only worth acting on while it can still change this turn. Past
+# this, round 2's answer is already on its way to the speaker and adjusting the
+# volume would mean talking over it.
+COMMAND_DEADLINE_S = 6
+COMMAND_TAGS = ("VOLUME_UP", "VOLUME_DOWN", "REPEAT")
+# No STOP tag: by the time a turn is being transcribed the device is listening,
+# not speaking -- the codec is half duplex -- so there is nothing for it to
+# interrupt. Revisit if playback ever becomes cancellable.
+COMMAND_PROMPT = (
+    "你是一个智能音箱的指令识别模块，不是聊天助手。"
+    "唯一任务：判断这段话是不是在直接吩咐这台音箱做事。"
+    "只输出一个标签，不准输出任何别的字、标点或者解释。\n"
+    "标签：\n"
+    "VOLUME_UP：要音箱说大声点（大声点、听不清、音量大一点）\n"
+    "VOLUME_DOWN：要音箱说小声点（小声点、太吵了、音量小一点）\n"
+    "REPEAT：要音箱把刚才的话再说一遍\n"
+    "NONE：其他任何情况\n"
+    "规则：\n"
+    "1. 拿不准就输出 NONE。宁可漏掉一次吩咐，也不要误判——"
+    "误判会让音箱在聊天中间自己改音量。\n"
+    "2. 必须是在吩咐这台音箱。说别的东西吵（电视、楼上、隔壁），"
+    "或者聊天里头提到“声音”“音量”这些词，都输出 NONE。\n"
+    "3. 一句话里头既有吩咐又有问题（“小声点，今天天气怎么样”），"
+    "输出 NONE，让聊天照常走。\n"
+    "4. 听不清、或者录到的是杂音，输出 NONE。"
+)
+# Beeps, not speech: generated locally by make_beep at boot, so this path needs
+# no network and works on a first boot with the Wi-Fi down. Played AFTER the
+# change lands, so the pitch is heard at the new level and the result is
+# self-evidencing -- the only feedback channel this device has.
+#
+# A rising chirp means louder and a falling one quieter, which is about as
+# self-explanatory as a sound gets. The same chirp TWICE means the request hit a
+# stop and nothing moved: a single chirp there would sound like success, and
+# they would ask again, hear the same thing, and conclude it is broken.
+BEEP_UP = "/tmp/vol_up.wav"
+BEEP_DOWN = "/tmp/vol_down.wav"
+BEEP_ACK = "/tmp/ack.wav"
+ACK_BEEPS = {
+    "up": (BEEP_UP, False),
+    "down": (BEEP_DOWN, False),
+    "at_max": (BEEP_UP, True),
+    "at_min": (BEEP_DOWN, True),
+    "nothing_to_repeat": (BEEP_ACK, True),
+}
+
+# Verified on the Pi 2026-09-30: the HAT (TLV320AIC3104) exposes the DAC volume
+# as PCM, 0-127 in 0.5 dB steps -- 127 is 0 dB and the 108 it ships at is
+# -9.5 dB. The speaker runs off the Line output, whose own amp already sits at
+# its 9 dB maximum, so PCM is the knob with both the headroom and the fine
+# steps. HP is muted and irrelevant here.
+PLAYBACK_CONTROL = "PCM"
+VOLUME_DEFAULT = 108
+VOLUME_STEP = 8        # 4 dB per request: clearly audible, not drastic
+VOLUME_CEILING = 127   # 0 dB, the codec's own limit
+# 12 dB below default. A floor exists because this device has no screen: if they
+# turn it down past hearing, the only way back is to ASK for it louder, and they
+# have to be able to hear the acknowledgement to know it worked.
+VOLUME_FLOOR = 84
+# ALSA mixer state does not survive a reboot (same reason set_capture_gain
+# exists), so an adjustment the parents made has to be remembered here and
+# re-applied at boot, or it silently reverts on the next restart.
+VOLUME_STATE = "/home/weilie/sichuan/volume"
 # Round 2, the voice. 3.5 series: required for enable_search (the 3.0 models
 # have no search at all), and it is the newest series that can still SPEAK —
 # 3.8-Omni-Flash is text-out only.
@@ -632,39 +712,45 @@ def synthesise_phrase(api_key, phrase, path):
     return True
 
 
-def ensure_filler(api_key):
-    """Synthesise each holding phrase once and keep it on disk, then publish
-    what landed as the rotation pool. Best-effort per phrase: one failure costs
-    that wording, not the feature, and if none land we simply stay silent while
-    searching. Only the first boot pays for this -- afterwards every file is
-    already cached and this makes no network call at all."""
-    wanted = {filler_path(ph): ph for ph in FILLER_PHRASES}
-    ready = []
+def ensure_phrases(api_key, kind, phrases):
+    """Synthesise each phrase once and keep it on disk. Returns {phrase: path}
+    for the ones that are actually there. Best-effort per phrase: one failure
+    costs that wording, not the feature. Only the first boot pays for this --
+    afterwards every file is cached and this makes no network call at all."""
+    wanted = {phrase_path(kind, ph): ph for ph in phrases}
+    ready = {}
     for path, phrase in wanted.items():
-        if os.path.exists(path):
-            ready.append(path)
-            continue
-        try:
-            if synthesise_phrase(api_key, phrase, path):
-                ready.append(path)
-                print(f"[boot] cached holding phrase: {phrase}", flush=True)
-            else:
-                print(f"[boot] no audio came back for {phrase!r}", flush=True)
-        except Exception as e:
-            print(f"[boot] could not cache {phrase!r}: "
-                  f"{type(e).__name__}: {e}", flush=True)
-    FILLER_WAVS[:] = ready
-    # Wordings edited out of FILLER_PHRASES would otherwise sit on the SD card
+        if not os.path.exists(path):
+            try:
+                if not synthesise_phrase(api_key, phrase, path):
+                    print(f"[boot] no audio came back for {phrase!r}", flush=True)
+                    continue
+                print(f"[boot] cached {kind}: {phrase}", flush=True)
+            except Exception as e:
+                print(f"[boot] could not cache {phrase!r}: "
+                      f"{type(e).__name__}: {e}", flush=True)
+                continue
+        ready[phrase] = path
+    # Wordings edited out of the source list would otherwise sit on the SD card
     # forever, one orphan per revision. Safe here: this runs before the wake
     # loop, so no playback can be holding one of these files.
-    for stale in glob.glob(os.path.join(FILLER_DIR, f"filler_{VOICE}_*.wav")):
+    for stale in glob.glob(os.path.join(PHRASE_DIR, f"{kind}_{VOICE}_*.wav")):
         if stale not in wanted:
             try:
                 os.remove(stale)
             except OSError:
                 pass
-    print(f"[boot] {len(FILLER_WAVS)}/{len(wanted)} holding phrases ready.",
-          flush=True)
+    print(f"[boot] {len(ready)}/{len(wanted)} {kind} phrases ready.", flush=True)
+    return ready
+
+
+def ensure_filler(api_key):
+    """Publish the holding-phrase rotation pool. Empty is supported: with no
+    files HoldingPhrase arms no timer and we simply stay silent while
+    searching."""
+    ready = ensure_phrases(api_key, "filler", FILLER_PHRASES)
+    FILLER_WAVS[:] = [ready[ph] for ph in FILLER_PHRASES if ph in ready]
+
 
 
 def device_today():
@@ -832,6 +918,156 @@ class SpeculativeVoice:
         return self.result
 
 
+def load_volume():
+    """The remembered playback level, or the shipped default. Any unreadable or
+    nonsense state file is treated as absent rather than fatal: a speaker that
+    refuses to boot is worse than one at the wrong volume."""
+    try:
+        with open(VOLUME_STATE) as f:
+            return max(VOLUME_FLOOR, min(VOLUME_CEILING, int(f.read().strip())))
+    except Exception:
+        return VOLUME_DEFAULT
+
+
+def save_volume(level):
+    """Write then rename, so a power cut cannot leave a half-written level that
+    load_volume() would silently round into something arbitrary."""
+    try:
+        tmp = VOLUME_STATE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(str(int(level)))
+        os.replace(tmp, VOLUME_STATE)
+    except Exception as e:
+        print(f"[volume] could not persist {level}: {type(e).__name__}: {e}",
+              flush=True)
+
+
+def apply_volume(level):
+    """Set the DAC volume on the HAT. Returns True on success. Never fatal, but
+    never silent either: a wrong level presents as "it got quiet by itself",
+    which is expensive to diagnose from 1000 km away."""
+    try:
+        r = subprocess.run(
+            ["amixer", "-c", CAPTURE_CARD, "sset", PLAYBACK_CONTROL, str(int(level))],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            print(f"[volume] WARNING amixer failed on {CAPTURE_CARD}: "
+                  f"{r.stderr.strip()[:200]}", flush=True)
+            return False
+        shown = next((ln.strip() for ln in r.stdout.splitlines()
+                      if "Front Left: Playback" in ln), "")
+        print(f"[volume] {PLAYBACK_CONTROL} -> {shown or level}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[volume] WARNING could not set volume: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return False
+
+
+def detect_command(audio_b64, api_key):
+    """Is the user telling the DEVICE to do something, rather than asking it? Returns one of
+    COMMAND_TAGS, or None meaning "this is conversation, carry on".
+
+    Fail-closed, deliberately: every error, every timeout and every answer that
+    is not exactly a known tag returns None. A missed command costs one repeated
+    request; a false positive changes the volume in the middle of someone's
+    question, which is the failure the whole prompt is written against."""
+    t0 = time.monotonic()
+    parts = []
+    try:
+        for resp in dashscope.MultiModalConversation.call(
+            api_key=api_key, model=COMMAND_MODEL,
+            messages=[
+                {"role": "system", "content": [{"text": COMMAND_PROMPT}]},
+                {"role": "user", "content": [
+                    {"audio": f"data:audio/wav;base64,{audio_b64}"}]},
+            ],
+            modalities=["text"],
+            max_tokens=COMMAND_MAX_TOKENS,
+            request_timeout=REQUEST_TIMEOUT_S,
+            result_format="message", stream=True):
+            j = json.loads(str(resp))
+            status = j.get("status_code")
+            if status and status != 200:
+                print(f"[command] cloud error: {status} {j.get('code')}",
+                      flush=True)
+                return None
+            for ch in (j.get("output") or {}).get("choices", []) or []:
+                for c in ch.get("message", {}).get("content", []):
+                    if isinstance(c, dict) and c.get("text"):
+                        parts.append(c["text"])
+    except Exception as e:
+        print(f"[command] failed after {time.monotonic()-t0:.1f}s: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return None
+    raw = "".join(parts).strip()
+    # Strip whatever the model wrapped the tag in -- punctuation, a stray
+    # "标签：" -- then require an exact match against the closed set. NONE and
+    # anything chatty both fall through to None.
+    tag = re.sub(r"[^A-Z_]", "", raw.upper())
+    print(f"[command] {time.monotonic()-t0:.1f}s -> {raw!r}", flush=True)
+    return tag if tag in COMMAND_TAGS else None
+
+
+class CommandWatcher:
+    """Command detection on its own thread, started with the search and the
+    speculative answer so it adds no wall-clock. result() is what the turn waits on, bounded: a verdict that
+    arrives after round 2 has started speaking is no longer actionable."""
+
+    def __init__(self, audio_b64, api_key):
+        self.tag = None
+        self._thread = threading.Thread(
+            target=self._run, args=(audio_b64, api_key), daemon=True)
+        self._thread.start()
+
+    def _run(self, audio_b64, api_key):
+        self.tag = detect_command(audio_b64, api_key)
+
+    def result(self, timeout):
+        self._thread.join(max(0.0, timeout))
+        if self._thread.is_alive():
+            print("[command] no verdict in time — treating as conversation.",
+                  flush=True)
+            return None
+        return self.tag
+
+
+def play_ack(key):
+    """Chirp the outcome of a command. Silent success is indistinguishable from
+    a device that did not hear, and that is what makes someone say it again,
+    louder."""
+    path, twice = ACK_BEEPS[key]
+    ok = play_wav(path)
+    if twice:
+        ok = play_wav(path) and ok
+    return ok
+
+
+def handle_command(tag):
+    """Act on a device command locally. Returns True if the user got audible
+    confirmation; the caller counts that as a live turn, so adjusting the volume
+    does not look like a dead turn and end the session.
+
+    A command never joins the history. It is not part of the conversation, and
+    replaying it would invite the model to discuss it on the next turn."""
+    if tag == "REPEAT":
+        if os.path.exists(RESPONSE_WAV):
+            return play_wav(RESPONSE_WAV)
+        return play_ack("nothing_to_repeat")
+    step = VOLUME_STEP if tag == "VOLUME_UP" else -VOLUME_STEP
+    before = load_volume()
+    after = max(VOLUME_FLOOR, min(VOLUME_CEILING, before + step))
+    if after == before:
+        # Already at the stop. Saying so beats acknowledging a change that did
+        # not happen: a cheerful "要得" at the floor has them ask again, hear the
+        # same reply, and conclude the device is broken.
+        return play_ack("at_max" if step > 0 else "at_min")
+    if not apply_volume(after):
+        return False
+    save_volume(after)
+    return play_ack("up" if step > 0 else "down")
+
+
 def cloud_reply(audio_bytes, api_key, history):
     """One user turn. Round 1 researches while a speculative round 2 answers
     the audio directly; whichever way round 1 settles decides which reply is
@@ -845,6 +1081,7 @@ def cloud_reply(audio_bytes, api_key, history):
 
     spec = (SpeculativeVoice(audio_b64, history, api_key)
             if SPECULATIVE_VOICE else None)
+    watcher = CommandWatcher(audio_b64, api_key) if COMMAND_DETECTION else None
 
     # The holding phrase only reaches a turn slow enough to mean a real search
     # is happening: a speculative win cancels it first.
@@ -863,6 +1100,18 @@ def cloud_reply(audio_bytes, api_key, history):
 
     facts, n_sources = research_pass(audio_b64, api_key, on_search=_on_search)
     holding.cancel()
+
+    # The command verdict settles first, because a command is not a question:
+    # if the user asked for a volume change there is no answer to speak, and the
+    # speculative reply -- which is busy answering "音量小一点" as conversation --
+    # has to be thrown away rather than played.
+    tag = (watcher.result(COMMAND_DEADLINE_S - (time.monotonic() - t0))
+           if watcher else None)
+    if tag:
+        print(f"[turn] device command: {tag}", flush=True)
+        if spec is not None:
+            spec.abort()
+        return handle_command(tag)
 
     # Restyle only when round 1 both SEARCHED and produced text. Round 1
     # answers plenty of questions from its own knowledge without searching;
@@ -1088,8 +1337,11 @@ def main():
         print("[boot] using the shared DASHSCOPE_API_KEY — this device's spend "
               "is not separable on the bill.", flush=True)
 
-    make_beep("/tmp/ack.wav")
+    make_beep(BEEP_ACK)
+    make_beep(BEEP_UP, freq=1180)
+    make_beep(BEEP_DOWN, freq=560)
     set_capture_gain()
+    apply_volume(load_volume())
     ensure_filler(api_key)
 
     print("[boot] loading sherpa-onnx KeywordSpotter (麻婆豆腐)...", flush=True)
