@@ -7,13 +7,29 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../s
 import unittest
 from unittest.mock import patch, MagicMock
 
+# dashscope is only installed on the Pi. Stub it for the import if missing,
+# then take the stub back out so it cannot make another test file's import
+# look healthy. The tests patch through the module's own reference below.
+_stubbed = "dashscope" not in sys.modules
+if _stubbed:
+    try:
+        __import__("dashscope")
+        _stubbed = False
+    except ImportError:
+        sys.modules["dashscope"] = MagicMock()
+
 # Import from the new location
+import transcribe as transcribe_mod
+import synthesize as synthesize_mod
 from transcribe import transcribe
 from synthesize import synthesize
 
+if _stubbed:
+    del sys.modules["dashscope"]
+
 class TestSichuanSpeech(unittest.TestCase):
 
-    @patch('dashscope.MultiModalConversation.call')
+    @patch.object(transcribe_mod.dashscope.MultiModalConversation, 'call')
     @patch('os.path.exists')
     @patch('os.path.getsize')
     @patch('os.getenv')
@@ -39,7 +55,7 @@ class TestSichuanSpeech(unittest.TestCase):
         sys.stdout = sys.__stdout__
         self.assertEqual(captured_output.getvalue().strip(), "你好")
 
-    @patch('dashscope.MultiModalConversation.call')
+    @patch.object(synthesize_mod.dashscope.MultiModalConversation, 'call')
     @patch('urllib.request.urlretrieve')
     @patch('os.getenv')
     def test_synthesize_success(self, mock_getenv, mock_retrieve, mock_call):

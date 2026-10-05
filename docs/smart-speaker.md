@@ -445,8 +445,10 @@ interaction):
     capture was < 400 ms or had no speech-like voicing (local
     reject, no cloud call), or the cloud returned no audio. Two consecutive dead turns end the
     session. Any successful reply zeros the counter and relaxes
-    the silence window. Effect: real conversations run unbounded;
-    a noisy room burns at most 2 cloud calls.
+    the silence window. Effect: a noisy room burns at most 2 cloud calls.
+    Speech-like noise (a TV) is not caught by this, so a session
+    is also capped at 10 cloud turns (`MAX_SESSION_TURNS`), ending
+    with a spoken sign-off.
   - Only applies to the press-to-talk (`wake_then_converse.py`)
     path. Realtime path gets end-of-speech from server-side VAD.
 - ✅ Multi-turn conversation memory within a session (commit

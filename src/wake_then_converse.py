@@ -159,14 +159,19 @@ PRE_SPEECH_PAD_MS = 300               # keep a ring buffer so we don't clip the 
 FIRST_TURN_SILENCE_TIMEOUT_S = 8
 FOLLOWUP_SILENCE_TIMEOUT_S = 6
 POST_DEAD_SILENCE_TIMEOUT_S = 2.5
+POST_ACK_MIC_DISCARD_S = 0.5
 
 # Guardrails against perpetual sessions in noisy rooms.
 #   - MIN_UTTERANCE_MS: anything shorter than this is treated as noise and
 #     skips the cloud call entirely (cheap, purely local).
 #   - MAX_CONSECUTIVE_DEAD_TURNS: after N turns in a row that either got
 #     rejected locally or came back with no cloud audio, end the session.
-# A real conversation runs unbounded; a room with just background noise
-# burns at most MAX_CONSECUTIVE_DEAD_TURNS turns before we drop out.
+# A room with just background noise burns at most MAX_CONSECUTIVE_DEAD_TURNS
+# turns before we drop out.
+#   - MAX_SESSION_TURNS: cap on cloud turns in one session. The dead-turn
+#     guard cannot see a TV: broadcast speech passes every local gate, the
+#     cloud answers it, and each "successful" turn keeps the session open.
+#     At the cap the device says so and goes back to the wake word.
 MIN_UTTERANCE_MS = 400
 # A capture long enough to pass MIN_UTTERANCE_MS can still be nothing but
 # keyboard clicks, and that is not a harmless case: it costs two cloud calls,
@@ -250,6 +255,7 @@ VOICE_DEADLINE_S = 30
 # 你好. Only a turn that is actually slow should get the holding phrase.
 FILLER_DELAY_S = 3.5
 MAX_CONSECUTIVE_DEAD_TURNS = 2
+MAX_SESSION_TURNS = 10
 
 # Sichuan-dialect voices on the omni models: Sunny (female), Eric (male).
 # Eric verified against qwen3.5-omni-flash on 2026-09-28 and chosen by ear.
@@ -343,6 +349,10 @@ COMMAND_ACKS = {
     "at_max": "已经是最大声咯。",
     "at_min": "已经是最小声咯。",
     "nothing_to_repeat": "我刚才还没说啥子喃。",
+    # Not a command, but it needs the same thing the acks do: a cached spoken
+    # line with the beep as fallback. Spoken when MAX_SESSION_TURNS ends a
+    # session, because a silent cut-off mid-conversation looks like a fault.
+    "session_cap": "我们摆了好一阵咯，我先歇一哈。还要摆的话，再喊一声麻婆豆腐哈。",
 }
 ACK_WAVS = {}
 
@@ -421,12 +431,33 @@ RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
 
 
+def log_stage(stage, message, **fields):
+    suffix = ""
+    if fields:
+        suffix = " " + " ".join(f"{key}={value}" for key, value in fields.items())
+    print(f"[{stage}] {message}{suffix}", flush=True)
+
+
+def pcm_rms(data):
+    audio_i16 = np.frombuffer(data, dtype=np.int16)
+    if len(audio_i16) == 0:
+        return 0
+    return int(math.sqrt(float(np.mean(audio_i16.astype(np.int64) ** 2))))
+
+
 # Every aplay in this process goes through this lock. The codec is half-duplex
 # and ~/.asoundrc points default at a bare plughw:2,0 with no dmix, so a second
 # concurrent open returns -EBUSY and that audio is simply lost. The holding
 # phrase plays from a timer thread while the main thread may be ready to play
 # the reply, so "concurrent" is a real state here, not a theoretical one.
 AUDIO_LOCK = threading.Lock()
+# Bound on one aplay. Replies run a few seconds, so 60 s is never reached by
+# audio that is actually playing -- it exists because a stalled aplay holds
+# AUDIO_LOCK with the process still alive, which systemd's Restart= never sees.
+# A stall therefore ends the process: a codec wedged badly enough to hang aplay
+# will hang the next one too, and a restart is the only recovery available
+# from 1000 km away.
+APLAY_TIMEOUT_S = 60
 
 
 def _aplay(path):
@@ -434,7 +465,19 @@ def _aplay(path):
     if not os.path.exists(path):
         print(f"[audio] missing {path}", flush=True)
         return False
-    r = subprocess.run(["aplay", "-q", path], capture_output=True, text=True)
+    t0 = time.monotonic()
+    log_stage("audio", "playback start", file=os.path.basename(path))
+    try:
+        r = subprocess.run(["aplay", "-q", path], capture_output=True,
+                           text=True, timeout=APLAY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        print(f"[audio] aplay stalled on {path} — killed after "
+              f"{APLAY_TIMEOUT_S}s. Exiting so systemd restarts the service.",
+              flush=True)
+        # os._exit, not sys.exit: this also runs on the holding-phrase timer
+        # thread, where SystemExit would end only that thread.
+        os._exit(1)
+        return False
     if r.returncode != 0:
         # Never silent. A reply that failed to play looks exactly like a
         # successful turn in the logs otherwise, and "it answered but we heard
@@ -442,6 +485,8 @@ def _aplay(path):
         print(f"[audio] aplay failed on {path}: rc={r.returncode} "
               f"{r.stderr.strip()[:160]}", flush=True)
         return False
+    log_stage("audio", "playback done", file=os.path.basename(path),
+              elapsed=f"{time.monotonic()-t0:.2f}s")
     return True
 
 
@@ -601,10 +646,15 @@ def endpoint(frames, vad, silence_timeout_s,
     voiced_frames = 0
     cur_run = 0
     longest_run = 0
+    opened_after_frames = None
 
-    def stats():
+    def stats(stop_reason=None):
         return {"voiced_ratio": (voiced_frames / total_frames) if total_frames else 0.0,
-                "longest_run_ms": longest_run * VAD_FRAME_MS}
+                "longest_run_ms": longest_run * VAD_FRAME_MS,
+                "leading_silence_ms": leading_silence * VAD_FRAME_MS,
+                "opened_after_ms": (opened_after_frames * VAD_FRAME_MS
+                                    if opened_after_frames is not None else None),
+                "stop_reason": stop_reason}
 
     for data in frames:
         is_speech = vad.is_speech(data, CONV_RATE_IN)
@@ -617,6 +667,7 @@ def endpoint(frames, vad, silence_timeout_s,
                 voiced_run += 1
                 if voiced_run >= start_voiced_needed:
                     in_speech = True
+                    opened_after_frames = leading_silence
                     captured.extend(ring); ring = []
                     silence_run = 0
                     total_frames = len(captured)
@@ -627,7 +678,7 @@ def endpoint(frames, vad, silence_timeout_s,
                 voiced_run = 0
                 leading_silence += 1
                 if leading_silence >= silence_timeout_frames:
-                    return b"", "timeout", stats()
+                    return b"", "timeout", stats("silence_timeout_before_speech")
         else:
             captured.append(data)
             total_frames += 1
@@ -641,12 +692,12 @@ def endpoint(frames, vad, silence_timeout_s,
                 cur_run = 0
                 silence_run += 1
                 if silence_run >= end_silence_needed:
-                    return b"".join(captured), "speech", stats()
+                    return b"".join(captured), "speech", stats("end_silence")
             if total_frames >= max_frames:
-                return b"".join(captured), "speech", stats()
+                return b"".join(captured), "speech", stats("max_utterance")
     # Offline only: the frame source ended. Live, stream_frames never stops.
     return (b"".join(captured) if in_speech else b""), \
-           ("speech" if in_speech else "timeout"), stats()
+           ("speech" if in_speech else "timeout"), stats("source_ended")
 
 
 def set_capture_gain():
@@ -685,7 +736,7 @@ def synthesise_phrase(api_key, phrase, path):
         messages=[{"role": "user", "content": [{"text":
             f"只念这一句，不要加别的字：{phrase}"}]}],
         modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
-        # Nine of these run before the wake loop on a first boot. Without a
+        # Ten of these run before the wake loop on a first boot. Without a
         # timeout one hung stream keeps the daemon from ever listening.
         request_timeout=REQUEST_TIMEOUT_S,
         result_format="message", stream=True):
@@ -794,6 +845,8 @@ def research_pass(audio_b64, api_key, on_search=None, give_up=None):
     asked for."""
     t0 = time.monotonic()
     parts, n_sources = [], 0
+    log_stage("research", "start", model=RESEARCH_MODEL,
+              deadline=f"{RESEARCH_DEADLINE_S}s")
     try:
         for resp in dashscope.MultiModalConversation.call(
             api_key=api_key, model=RESEARCH_MODEL,
@@ -855,6 +908,9 @@ def voice_call(content, history, api_key, stop_event=None):
     Any failure here is a dead turn, which converse_session already counts."""
     t0 = time.monotonic()
     audio_chunks, text_parts = [], []
+    content_kind = "audio" if any("audio" in item for item in content) else "text"
+    log_stage("voice", "start", model=MODEL, content=content_kind,
+              history_turns=len(history) // 2)
     try:
         responses = dashscope.MultiModalConversation.call(
             api_key=api_key, model=MODEL,
@@ -914,6 +970,7 @@ class SpeculativeVoice:
     def __init__(self, audio_b64, history, api_key):
         self.stop = threading.Event()
         self.result = None
+        log_stage("voice", "speculative start")
         # History is copied, not shared: cloud_reply mutates the real list
         # once the turn resolves, and this thread may still be reading it.
         self._thread = threading.Thread(
@@ -927,9 +984,12 @@ class SpeculativeVoice:
             history, api_key, stop_event=self.stop)
 
     def abort(self):
+        log_stage("voice", "speculative abort requested")
         self.stop.set()
 
     def wait(self):
+        log_stage("voice", "waiting for speculative result",
+                  timeout=f"{SPEC_WAIT_TIMEOUT_S}s")
         self._thread.join(SPEC_WAIT_TIMEOUT_S)
         if self._thread.is_alive():
             print("[voice] speculative call still running after "
@@ -995,6 +1055,8 @@ def detect_command(audio_b64, api_key):
     question, which is the failure the whole prompt is written against."""
     t0 = time.monotonic()
     parts = []
+    log_stage("command", "start", model=COMMAND_MODEL,
+              deadline=f"{COMMAND_DEADLINE_S}s")
     try:
         for resp in dashscope.MultiModalConversation.call(
             api_key=api_key, model=COMMAND_MODEL,
@@ -1041,12 +1103,22 @@ class CommandWatcher:
     def __init__(self, audio_b64, api_key, on_decide=None):
         self.tag = None
         self._on_decide = on_decide
+        # Guards the hand-off between a verdict landing and result() giving
+        # up on it, so exactly one of the two wins.
+        self._lock = threading.Lock()
+        self._gave_up = False
         self._thread = threading.Thread(
             target=self._run, args=(audio_b64, api_key), daemon=True)
         self._thread.start()
 
     def _run(self, audio_b64, api_key):
-        self.tag = detect_command(audio_b64, api_key)
+        tag = detect_command(audio_b64, api_key)
+        with self._lock:
+            # The turn already went ahead as conversation. Acting now would
+            # abort the speculative reply it is waiting on and execute nothing.
+            if self._gave_up:
+                return
+            self.tag = tag
         # Fire the moment we know, not when the turn gets around to asking.
         # give_up is only polled when a research chunk ARRIVES, so on a stream
         # that goes quiet mid-search the holding phrase would otherwise still
@@ -1065,21 +1137,26 @@ class CommandWatcher:
 
     def result(self, timeout):
         self._thread.join(max(0.0, timeout))
-        if self._thread.is_alive():
-            print("[command] no verdict in time — treating as conversation.",
-                  flush=True)
-            return None
-        return self.tag
+        with self._lock:
+            if self.tag is None and self._thread.is_alive():
+                self._gave_up = True
+                print("[command] no verdict in time — treating as conversation.",
+                      flush=True)
+            return self.tag
 
 
-def play_ack(key):
+def play_ack(key, beep_fallback=True):
     """Speak the outcome of a command. Silent success is indistinguishable from
     a device that did not hear, and that is what makes someone say it again,
     louder -- so a phrase that never cached still beeps rather than saying
-    nothing."""
+    nothing. beep_fallback=False is for a line the beep would contradict."""
     path = ACK_WAVS.get(key)
     if path and os.path.exists(path):
         return play_wav(path)
+    if not beep_fallback:
+        print(f"[command] no cached ack for {key!r} — staying silent.",
+              flush=True)
+        return False
     print(f"[command] no cached ack for {key!r} — beeping instead.", flush=True)
     return play_wav(BEEP_ACK)
 
@@ -1116,9 +1193,14 @@ def cloud_reply(audio_bytes, api_key, history):
     with wave.open(RECORDING_WAV, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(CONV_RATE_IN)
         w.writeframes(audio_bytes)
+    log_stage("turn", "recording saved", file=RECORDING_WAV,
+              bytes=len(audio_bytes),
+              duration=f"{len(audio_bytes)/(CONV_RATE_IN*2):.2f}s")
     with open(RECORDING_WAV, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
     t0 = time.monotonic()
+    log_stage("turn", "cloud turn start", history_turns=len(history)//2,
+              speculative=SPECULATIVE_VOICE, command_detection=COMMAND_DETECTION)
 
     spec = (SpeculativeVoice(audio_b64, history, api_key)
             if SPECULATIVE_VOICE else None)
@@ -1152,6 +1234,8 @@ def cloud_reply(audio_bytes, api_key, history):
         audio_b64, api_key, on_search=_on_search,
         give_up=(watcher.decided if watcher else None))
     holding.cancel()
+    log_stage("turn", "research finished", facts=bool(facts),
+              sources=n_sources, search_fired=search_fired.is_set())
 
     # The command verdict settles first, because a command is not a question:
     # if the user asked for a volume change there is no answer to speak, and the
@@ -1172,6 +1256,7 @@ def cloud_reply(audio_bytes, api_key, history):
     # than a paraphrase of it.
     result = None
     if facts and (n_sources > 0 or search_fired.is_set()):
+        log_stage("turn", "voice path", mode="restyle_search_facts")
         if spec is not None:
             spec.abort()
         result = voice_call(
@@ -1182,6 +1267,7 @@ def cloud_reply(audio_bytes, api_key, history):
                       "“爷爷/奶奶”这种带杠的写法——这段话是要念出来的：\n" + facts}],
             history, api_key)
     elif spec is not None and not search_fired.is_set():
+        log_stage("turn", "voice path", mode="speculative_direct")
         result = spec.wait()
     elif spec is not None:
         # Search fired and then round 1 failed. The speculative stream is
@@ -1193,9 +1279,11 @@ def cloud_reply(audio_bytes, api_key, history):
         # Nothing usable from either path — answer the audio unaided rather
         # than drop the turn. Also the path taken when SPECULATIVE_VOICE=False
         # and the turn did not search.
+        log_stage("turn", "voice path", mode="fallback_direct")
         result = voice_call(
             [{"audio": f"data:audio/wav;base64,{audio_b64}"}], history, api_key)
     if result is None:
+        log_stage("turn", "cloud turn failed", reason="no_voice_result")
         return False
     text, audio_chunks = result
 
@@ -1204,6 +1292,7 @@ def cloud_reply(audio_bytes, api_key, history):
     print("[turn] reply:", text, flush=True)
     if not audio_chunks:
         print("[turn] no audio in response.", flush=True)
+        log_stage("turn", "cloud turn failed", reason="text_without_audio")
         return False
     reply_bytes = b"".join(base64.b64decode(p_) for p_ in audio_chunks)
     if reply_bytes[:4] == b"RIFF":
@@ -1218,6 +1307,7 @@ def cloud_reply(audio_bytes, api_key, history):
         # dead turn and keep it out of the history: as far as the user is
         # concerned this answer does not exist, and a session that silently
         # "remembers" something never spoken drifts from there on.
+        log_stage("turn", "cloud turn failed", reason="playback_failed")
         return False
     # History carries the user's ACTUAL question as audio, never the restyle
     # instruction a search turn sends to the voice model. That blob is
@@ -1228,19 +1318,26 @@ def cloud_reply(audio_bytes, api_key, history):
                     "content": [{"audio": f"data:audio/wav;base64,{audio_b64}"}]})
     history.append({"role": "assistant", "content": [{"text": text}]})
     del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
+    log_stage("turn", "cloud turn success", elapsed=f"{time.monotonic()-t0:.1f}s",
+              history_turns=len(history)//2)
     return True
 
 
 def converse_session(p, api_key):
     """Multi-turn session. Listens after each reply and continues as long as
-    the user keeps producing real speech. Ends on natural silence, or after
-    MAX_CONSECUTIVE_DEAD_TURNS turns of noise-only input. Returns when the
+    the user keeps producing real speech. Ends on natural silence, after
+    MAX_CONSECUTIVE_DEAD_TURNS turns of noise-only input, or at
+    MAX_SESSION_TURNS cloud turns. Returns when the
     session ends; caller resumes wake-word listening."""
     vad = build_vad()
     # Fresh history per session: a new wake word starts a new conversation.
     history = []
     turn = 0
     dead_turns = 0
+    cloud_turns = 0
+    log_stage("session", "start", vad=VAD_ENGINE,
+              first_timeout=f"{FIRST_TURN_SILENCE_TIMEOUT_S}s",
+              discard_after_open=f"{POST_ACK_MIC_DISCARD_S}s")
     while True:
         turn += 1
         if hasattr(vad, "reset"):
@@ -1251,6 +1348,7 @@ def converse_session(p, api_key):
         # which escapes main(), killing the daemon — or lets the device hear
         # its own voice.
         wait_for_audio_idle()
+        log_stage("turn", "opening conversation mic", turn=turn)
         stream = p.open(
             format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
             input=True, frames_per_buffer=VAD_FRAME_SAMPLES,
@@ -1258,14 +1356,26 @@ def converse_session(p, api_key):
         # Discard the first N seconds after opening the mic. aplay can
         # return before the codec buffer is fully drained, so speaker
         # audio may still be emitting for a moment; plus room echo of
-        # the reply lingers a bit. 2 s covers both without cutting into
-        # real user response time (silence timeout starts after this).
+        # the reply lingers a bit.
         t = time.monotonic()
-        while time.monotonic() - t < 2.0:
-            stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+        discard_frames = 0
+        discard_peak_rms = 0
+        while time.monotonic() - t < POST_ACK_MIC_DISCARD_S:
+            data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+            discard_frames += 1
+            discard_peak_rms = max(discard_peak_rms, pcm_rms(data))
         # Drain anything still queued after the warmup window.
+        drained_frames = 0
+        drained_peak_rms = 0
         while stream.get_read_available() >= VAD_FRAME_SAMPLES:
-            stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+            data = stream.read(VAD_FRAME_SAMPLES, exception_on_overflow=False)
+            drained_frames += 1
+            drained_peak_rms = max(drained_peak_rms, pcm_rms(data))
+        log_stage("turn", "post-open discard complete", turn=turn,
+                  discard_frames=discard_frames,
+                  discard_peak_rms=discard_peak_rms,
+                  drained_frames=drained_frames,
+                  drained_peak_rms=drained_peak_rms)
 
         if dead_turns > 0:
             timeout = POST_DEAD_SILENCE_TIMEOUT_S
@@ -1274,11 +1384,17 @@ def converse_session(p, api_key):
         else:
             timeout = FOLLOWUP_SILENCE_TIMEOUT_S
         print(f"[turn {turn}] listening (VAD; silence timeout {timeout}s)...", flush=True)
+        log_stage("turn", "vad listen start", turn=turn, timeout=f"{timeout}s")
         audio_bytes, reason, st = record_utterance(stream, vad, timeout)
         stream.stop_stream(); stream.close()
+        log_stage("turn", "vad listen done", turn=turn, reason=reason,
+                  stop=st.get("stop_reason"),
+                  leading_silence_ms=st.get("leading_silence_ms"),
+                  opened_after_ms=st.get("opened_after_ms"))
 
         if reason == "timeout":
             print(f"[turn {turn}] silence — ending session.", flush=True)
+            log_stage("session", "end", reason="silence_timeout", turn=turn)
             return
 
         utt_ms = len(audio_bytes) * 1000 // (CONV_RATE_IN * 2)
@@ -1301,6 +1417,7 @@ def converse_session(p, api_key):
                   f"(dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
             if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
                 print(f"[session] {dead_turns} consecutive dead turns — ending.", flush=True)
+                log_stage("session", "end", reason="dead_turns", turn=turn)
                 return
             continue
         ok = cloud_reply(audio_bytes, api_key, history)
@@ -1311,7 +1428,17 @@ def converse_session(p, api_key):
             print(f"[turn {turn}] cloud returned no audio (dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
             if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
                 print(f"[session] {dead_turns} consecutive dead turns — ending.", flush=True)
+                log_stage("session", "end", reason="dead_turns", turn=turn)
                 return
+        cloud_turns += 1
+        if cloud_turns >= MAX_SESSION_TURNS:
+            print(f"[session] {cloud_turns} cloud turns — session cap reached, "
+                  f"ending.", flush=True)
+            # No beep if the phrase never cached: the beep means "I'm
+            # listening", and this is the moment the device stops.
+            play_ack("session_cap", beep_fallback=False)
+            log_stage("session", "end", reason="turn_cap", turn=turn)
+            return
 
 
 class NearMissWatcher:
@@ -1453,11 +1580,16 @@ def main():
                     if nearmiss is not None:
                         nearmiss.note_detection()
                     print(f"\n*** WAKE detected ({result!r}) — opening session ***", flush=True)
+                    log_stage("wake", "detected", result=repr(result))
                     # Free codec for the conversation
+                    log_stage("wake", "closing wake mic")
                     wake_stream.stop_stream(); wake_stream.close(); wake_stream = None
-                    play_wav("/tmp/ack.wav")
+                    log_stage("wake", "ack start")
+                    ack_ok = play_wav("/tmp/ack.wav")
+                    log_stage("wake", "ack done", ok=ack_ok)
                     converse_session(p, api_key)
                     print("[session] done. resuming wake-word listening.\n", flush=True)
+                    log_stage("wake", "resuming wake loop")
                     break
         except KeyboardInterrupt:
             print("\n[exit] Ctrl+C", flush=True)
