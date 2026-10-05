@@ -156,6 +156,25 @@ class TestWatcherSilencesTheFiller(unittest.TestCase):
         holding.cancel.assert_called()
         spec.abort.assert_called()
 
+    def test_a_verdict_after_the_deadline_does_not_fire(self):
+        # The turn has moved on to the speculative reply by then; firing would
+        # abort that reply and execute nothing.
+        import threading
+        release = threading.Event()
+        fired = []
+
+        def slow(*_):
+            release.wait(2)
+            return "VOLUME_DOWN"
+        with patch.object(W, "detect_command", side_effect=slow):
+            watcher = W.CommandWatcher("Zm9v", "key",
+                                       on_decide=lambda: fired.append(True))
+            self.assertIsNone(watcher.result(0.05))
+            release.set()
+            watcher._thread.join(2)
+        self.assertEqual(fired, [])
+        self.assertFalse(watcher.decided())
+
 
 class TestVolumeCommands(unittest.TestCase):
     def setUp(self):
@@ -276,6 +295,56 @@ class TestCommandTurn(unittest.TestCase):
             self.assertTrue(W.cloud_reply(b"\x00\x00" * 800, "key", history))
         handled.assert_not_called()
         self.assertEqual(len(history), 2)
+
+
+class TestPlaybackTimeout(unittest.TestCase):
+    def test_a_stalled_aplay_exits_so_systemd_restarts_the_service(self):
+        stalled = W.subprocess.TimeoutExpired("aplay", W.APLAY_TIMEOUT_S)
+        with patch.object(W.os.path, "exists", return_value=True), \
+             patch.object(W.subprocess, "run", side_effect=stalled) as run, \
+             patch.object(W.os, "_exit") as bail:
+            self.assertFalse(W.play_wav("/tmp/x.wav"))
+        self.assertEqual(run.call_args.kwargs["timeout"], W.APLAY_TIMEOUT_S)
+        bail.assert_called_once_with(1)
+
+    def test_the_session_cap_line_never_falls_back_to_the_listen_beep(self):
+        with patch.dict(W.ACK_WAVS, {}, clear=True), \
+             patch.object(W, "play_wav") as play:
+            self.assertFalse(W.play_ack("session_cap", beep_fallback=False))
+            play.assert_not_called()
+            W.play_ack("up")
+            play.assert_called_once_with(W.BEEP_ACK)
+        self.assertIn("session_cap", W.COMMAND_ACKS)
+
+
+class TestSessionCap(unittest.TestCase):
+    """A TV passes every local gate and gets answered, so successful turns
+    alone must not be able to keep a session open for ever."""
+
+    def _run(self, replies):
+        st = {"voiced_ratio": 0.9, "longest_run_ms": 1000}
+        speech = (b"\x00\x00" * 16000, "speech", st)
+        with patch.object(W, "build_vad", return_value=MagicMock()), \
+             patch.object(W, "wait_for_audio_idle"), \
+             patch.object(W, "pcm_rms", return_value=0), \
+             patch.object(W, "POST_ACK_MIC_DISCARD_S", 0), \
+             patch.object(W, "record_utterance", return_value=speech), \
+             patch.object(W, "cloud_reply", side_effect=replies) as cloud, \
+             patch.object(W, "play_ack") as ack:
+            p = MagicMock()
+            p.open.return_value.get_read_available.return_value = 0
+            W.converse_session(p, "key")
+        return cloud, ack
+
+    def test_the_session_ends_at_the_cap_and_says_so(self):
+        cloud, ack = self._run([True] * (W.MAX_SESSION_TURNS + 5))
+        self.assertEqual(cloud.call_count, W.MAX_SESSION_TURNS)
+        ack.assert_called_once_with("session_cap", beep_fallback=False)
+
+    def test_dead_turns_still_end_it_first_without_the_sign_off(self):
+        cloud, ack = self._run([True, False, False, True])
+        self.assertEqual(cloud.call_count, 3)
+        ack.assert_not_called()
 
 
 if __name__ == '__main__':

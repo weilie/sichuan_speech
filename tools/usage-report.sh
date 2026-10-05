@@ -21,6 +21,10 @@ set -euo pipefail
 CYCLE="${1:-$(date -u +%Y-%m)}"
 PROFILE="${ALIYUN_PROFILE:-glasses-deploy}"
 PI="${PI:-weilie@sichuan-pi.local}"
+# First day of the month after CYCLE, so the journal section covers the same
+# month as the billing sections when CYCLE is a past month.
+CY="${CYCLE%-*}"; CM="${CYCLE#*-}"
+NEXT=$(printf '%04d-%02d' $(( 10#$CM == 12 ? CY + 1 : CY )) $(( 10#$CM % 12 + 1 )))
 
 echo "== Bill overview $CYCLE (USD, pre-tax)"
 aliyun bssopenapi QueryBillOverview --BillingCycle "$CYCLE" \
@@ -64,7 +68,7 @@ printf '%s' "$PAGES" | node -e '
 # searches costs roughly as much as 8000 tokens. Worth watching directly.
 echo "== Device, from the Pi's journal (live, no billing lag)"
 ssh -o ConnectTimeout=8 "$PI" '
-  journalctl --user -u sichuan.service --since "'"${CYCLE}"'-01" --no-pager 2>/dev/null |
+  journalctl --user -u sichuan.service --since "'"${CYCLE}"'-01" --until "'"${NEXT}"'-01" --no-pager 2>/dev/null |
   awk "
     /\[turn\] .* sources\./ { turns++; if (\$0 !~ /, 0 sources/) searched++ }
     /\[session\] done/      { sessions++ }

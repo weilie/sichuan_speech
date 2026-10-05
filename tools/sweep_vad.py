@@ -63,7 +63,7 @@ def capture_per_beep(path, marks, aggressiveness, end_silence_ms,
     neighbour's words. Restarting at each beep removes it.
 
     The guard skips the beep tone itself: the corpus records it, the device
-    never hears it (mic opens after playback, then discards 2 s), and being a
+    never hears it (mic opens after playback, then discards 0.5 s), and being a
     loud tone the VAD calls it voice -- so it both fakes a capture and keeps
     the silence counter from ever advancing.
     """
@@ -158,7 +158,7 @@ def main():
                     help="ignore captures that are only the beep itself. The "
                          "corpus records the beep; the device never hears it, "
                          "because the mic opens after playback and discards "
-                         "2 s. Without this the beep IS the first capture in "
+                         "0.5 s. Without this the beep IS the first capture in "
                          "every window and the real utterance looks missed.")
     ap.add_argument("--aggressiveness", default="2",
                     help="comma-separated VAD levels to try")

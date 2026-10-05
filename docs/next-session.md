@@ -481,9 +481,12 @@ arbitrary caps.
   - Follow-up turns: **6 s** (natural conversational pause).
   - After a dead turn: **2.5 s** (tighten so noise can't drag
     the session along).
-- **No max turns, no max wall-clock cap.** A real conversation
-  runs unbounded.
+- **Max 10 cloud turns per session** (`MAX_SESSION_TURNS`), no
+  wall-clock cap. The cap exists for the TV case: broadcast speech
+  passes the local gates and every answered turn keeps the session
+  open. At the cap the device says so and returns to the wake word.
 - **Session ends** on any of:
+  - 10 cloud turns reached (spoken sign-off), or
   - Silence timeout expires with no speech (normal end), or
   - 2 consecutive dead turns (noise-only input; ends the
     session and drops back to wake-word listening).
