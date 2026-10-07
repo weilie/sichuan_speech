@@ -28,14 +28,14 @@ SNR: energy-based endpoint detection is the very thing under test, so using it
 as ground truth would be circular. Pass --no-asr for a quick structural run
 that reports recall and false accepts only.
 
-Replays the DEVICE's endpointer (wake_then_converse.endpoint), not a copy.
+Replays the DEVICE's endpointer (wake_then_converse.endpoint), not a copy,
+with the DEVICE's VAD: Silero at the shipped threshold by default. Pass
+--vad webrtcvad to measure the fallback engine instead. The false-accept
+column is only comparable between runs at the same --end-silence.
 """
 import argparse, json, os, sys, wave, base64, io as _io
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, "/home/weilie/sichuan")
-import webrtcvad
-import wake_then_converse as W
+from _daemon import W
 
 
 def wav_frames(path, start_s=0.0, end_s=None):
@@ -50,8 +50,7 @@ def wav_frames(path, start_s=0.0, end_s=None):
         yield pcm[i:i + n]
 
 
-def capture_per_beep(path, marks, aggressiveness, end_silence_ms,
-                     window, beep_guard):
+def capture_per_beep(path, marks, mkvad, end_silence_ms, window, beep_guard):
     """One independent capture per beep, which is how the DEVICE works: each
     turn opens the mic, takes one utterance and closes it.
 
@@ -69,7 +68,7 @@ def capture_per_beep(path, marks, aggressiveness, end_silence_ms,
     """
     out = []
     for m in marks:
-        vad = webrtcvad.Vad(aggressiveness)
+        vad = mkvad()   # fresh per capture, as the device resets between turns
         frames = wav_frames(path, m + beep_guard, m + window)
         audio, reason, st = W.endpoint(frames, vad, window,
                                        end_silence_ms=end_silence_ms)
@@ -90,10 +89,10 @@ def passes_gate(audio, st):
             and st["voiced_ratio"] >= W.MIN_VOICED_RATIO)
 
 
-def captures(path, aggressiveness, end_silence_ms, silence_timeout_s=600.0):
+def captures(path, mkvad, end_silence_ms, silence_timeout_s=600.0):
     """Every utterance the endpointer would produce over a whole file, with
     the frame index each one started at."""
-    vad = webrtcvad.Vad(aggressiveness)
+    vad = mkvad()
     frames = wav_frames(path)
     out = []
     consumed = [0]
@@ -160,24 +159,39 @@ def main():
                          "because the mic opens after playback and discards "
                          "0.5 s. Without this the beep IS the first capture in "
                          "every window and the real utterance looks missed.")
-    ap.add_argument("--aggressiveness", default="2",
-                    help="comma-separated VAD levels to try")
+    ap.add_argument("--vad", choices=["silero", "webrtcvad"], default="silero",
+                    help="engine to replay: the shipped Silero (default) or "
+                         "the webrtcvad fallback")
+    ap.add_argument("--silero-threshold", default=str(W.SILERO_VAD_THRESHOLD),
+                    help="comma-separated Silero thresholds to try (silero only)")
+    ap.add_argument("--aggressiveness", default=str(W.VAD_AGGRESSIVENESS),
+                    help="comma-separated webrtcvad levels to try (webrtcvad only)")
     ap.add_argument("--end-silence", default="800,1400,2000",
                     help="comma-separated END_SILENCE_MS values to try")
     ap.add_argument("--no-asr", action="store_true")
     a = ap.parse_args()
 
     marks = [float(l.split()[1]) for l in open(a.marks) if l.strip()]
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    api_key = (os.environ.get("SICHUAN_DASHSCOPE_API_KEY")
+               or os.environ.get("DASHSCOPE_API_KEY", ""))
     if not a.no_asr and not api_key:
-        sys.exit("DASHSCOPE_API_KEY not set (or pass --no-asr)")
+        sys.exit("neither SICHUAN_DASHSCOPE_API_KEY nor DASHSCOPE_API_KEY is "
+                 "set (or pass --no-asr)")
+    # One VAD factory per setting, labelled for the table.
+    if a.vad == "silero":
+        settings = [(f"th{t:g}", lambda t=t: W.SileroVad(t))
+                    for t in (float(x) for x in a.silero_threshold.split(","))]
+    else:
+        import webrtcvad
+        settings = [(f"agg{g}", lambda g=g: webrtcvad.Vad(g))
+                    for g in (int(x) for x in a.aggressiveness.split(","))]
     # Score each distinct capture once even when settings agree on it.
     seen = {}
-    print(f"{len(marks)} utterances, phrase {a.phrase!r}\n")
-    print(f"{'agg':>3} {'end_ms':>7} {'recall':>9} {'complete':>10} {'false':>6}  missed")
-    for agg in [int(x) for x in a.aggressiveness.split(",")]:
+    print(f"{len(marks)} utterances, phrase {a.phrase!r}, engine {a.vad}\n")
+    print(f"{'vad':>6} {'end_ms':>7} {'recall':>9} {'complete':>10} {'false':>6}  missed")
+    for label, mkvad in settings:
         for end_ms in [int(x) for x in a.end_silence.split(",")]:
-            caps = capture_per_beep(a.positives, marks, agg, end_ms,
+            caps = capture_per_beep(a.positives, marks, mkvad, end_ms,
                                     a.window, a.beep_guard)
             hit, complete, missed = 0, 0, []
             for i, c in enumerate(caps, 1):
@@ -187,16 +201,16 @@ def main():
                 hit += 1
                 if a.no_asr:
                     continue
-                k = (agg, end_ms, i)
+                k = (label, end_ms, i)
                 if k not in seen:
                     seen[k] = transcribe(c["audio"], api_key)
                 if a.phrase in seen[k].replace(" ", ""):
                     complete += 1
-            nfalse = (len([c for c in captures(a.negatives, agg, end_ms)
+            nfalse = (len([c for c in captures(a.negatives, mkvad, end_ms)
                            if not c["gated"]]) if a.negatives else -1)
             comp = "n/a" if a.no_asr else f"{complete}/{len(marks)}"
             fa = "n/a" if nfalse < 0 else str(nfalse)
-            print(f"{agg:>3} {end_ms:>7} {hit:>4}/{len(marks):<4} {comp:>10} {fa:>6}  "
+            print(f"{label:>6} {end_ms:>7} {hit:>4}/{len(marks):<4} {comp:>10} {fa:>6}  "
                   f"{missed if missed else ''}")
 
 

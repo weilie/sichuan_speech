@@ -32,6 +32,11 @@ CHUNK = 1600
 # before recording the user's actual speech avoids losing the first words.
 WARMUP_SECS = 3.5
 
+# Deliberately shorter than the daemon's prompt in wake_then_converse.py and
+# not kept word-for-word in step with it. Persona, brevity and the health /
+# money safety rails are the same in substance; the daemon's extra rules
+# (quoting searched facts, addressing 爷爷 / 奶奶 by voice) belong to machinery
+# this script does not have.
 SICHUAN_SYSTEM_PROMPT = (
     "你是一个用四川话回答的语音助手，扮演的角色像家里孝顺的孙辈，"
     "在跟长辈聊天。回答要求："

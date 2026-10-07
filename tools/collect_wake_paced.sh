@@ -21,7 +21,8 @@ PHRASE="${5:-麻婆豆腐}"   # what to say after each beep
 OUT_DIR="$HOME/sichuan/wake_data"
 OUT="$OUT_DIR/${NAME}.wav"
 MARKS="$OUT_DIR/${NAME}.marks"
-CARD=2
+CARD=seeed2micvoicec   # by name, as the daemon does: the card index is
+                       # not stable across kernel updates
 LEAD=3          # silence before the first beep
 TAIL=6          # keep recording after the last beep. Was 2, which was
                 # shorter than one answer window plus aplay drift, so the

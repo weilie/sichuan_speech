@@ -2,7 +2,6 @@
 Sichuan-dialect Text-to-Speech script using Alibaba DashScope.
 Uses qwen3-tts-flash with Sichuan voices (Sunny/Eric).
 """
-import os
 import sys
 import argparse
 import urllib.request

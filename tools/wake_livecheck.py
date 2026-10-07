@@ -22,27 +22,20 @@ which knob is wrong:
 """
 import subprocess, sys, time, wave
 import numpy as np
-from sherpa_onnx import KeywordSpotter
+from _daemon import W
 
-MODEL_DIR = "/home/weilie/sichuan/models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
-KEYWORDS = "/home/weilie/sichuan/models/wake_keywords.txt"
 WAV = "/tmp/wake_livecheck.wav"
 SECONDS = 25
 SERVICE = "sichuan.service"
-# Live setting first, then looser. See sweep_kws.py for why looser is not
+# Live setting first -- read from the daemon, so this can never label a
+# stale cell as live -- then looser. See sweep_kws.py for why looser is not
 # automatically better -- 5.0/0.02 catches FEWER utterances, not more.
-GRID = [(4.0, 0.05), (3.0, 0.10), (2.5, 0.10), (2.0, 0.20), (1.5, 0.25)]
+LIVE = (W.KWS_SCORE, W.KWS_THRESHOLD)
+GRID = [LIVE, (3.0, 0.10), (2.5, 0.10), (2.0, 0.20), (1.5, 0.25)]
 
 
 def build(score, thresh):
-    return KeywordSpotter(
-        tokens=f"{MODEL_DIR}/tokens.txt",
-        encoder=f"{MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        decoder=f"{MODEL_DIR}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        joiner=f"{MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=KEYWORDS, num_threads=1, max_active_paths=16,
-        keywords_score=score, keywords_threshold=thresh,
-        num_trailing_blanks=1, provider="cpu")
+    return W.build_kws(score, thresh)
 
 
 def main():
@@ -61,7 +54,7 @@ def main():
     with wave.open(WAV) as w:
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
     # Level first: a detection question is only meaningful if speech arrived.
-    win = 1600
+    win = W.WAKE_CHUNK
     rms = np.array([int(np.sqrt(np.mean(pcm[i:i+win].astype(np.int64)**2)))
                     for i in range(0, len(pcm)-win, win)])
     clipped = 100.0 * np.count_nonzero(np.abs(pcm) >= 32700) / max(len(pcm), 1)
@@ -76,13 +69,13 @@ def main():
         st = sp.create_stream()
         hits = []
         for i in range(0, len(audio), win):
-            st.accept_waveform(16000, audio[i:i+win])
+            st.accept_waveform(W.WAKE_RATE, audio[i:i+win])
             while sp.is_ready(st):
                 sp.decode_stream(st)
             if sp.get_result(st):
-                hits.append(round(i / 16000.0, 1))
+                hits.append(round(i / W.WAKE_RATE, 1))
                 sp.reset_stream(st)
-        tag = "  <-- LIVE SETTING" if (score, thresh) == (4.0, 0.05) else ""
+        tag = "  <-- LIVE SETTING" if (score, thresh) == LIVE else ""
         print(f"score={score:<4} thresh={thresh:<5} hits={len(hits)} at {hits}{tag}")
 
 

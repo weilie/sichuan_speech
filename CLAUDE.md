@@ -111,4 +111,6 @@ back as `Invalid API-key provided`.
   does more than dialect enforcement — it also fixes persona ("filial
   grandchild talking to elders"), enforces brevity (2-3 sentences),
   and sets safety rails for medical / health / money topics. Preserve
-  those aspects if refactoring; feel free to iterate on wording.
+  those aspects if refactoring; feel free to iterate on wording. The
+  daemon's prompt is the current one; `converse.py` keeps a shorter
+  original on purpose (its extra rules need the research pass).

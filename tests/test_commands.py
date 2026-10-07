@@ -234,6 +234,23 @@ class TestRepeat(unittest.TestCase):
             self.assertTrue(W.handle_command("REPEAT"))
         ack.assert_called_once_with("nothing_to_repeat")
 
+    def test_a_new_session_starts_with_nothing_to_repeat(self):
+        # RESPONSE_WAV outlives the session that wrote it; left alone, "再说一遍"
+        # on a fresh wake replayed an answer from hours earlier.
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "response.wav")
+        open(path, "wb").close()
+        silent = (b"", "timeout", {"stop_reason": "silence_timeout_before_speech"})
+        with patch.object(W, "RESPONSE_WAV", path), \
+             patch.object(W, "build_vad", return_value=MagicMock()), \
+             patch.object(W, "wait_for_audio_idle"), \
+             patch.object(W, "POST_ACK_MIC_DISCARD_S", 0), \
+             patch.object(W, "record_utterance", return_value=silent):
+            p = MagicMock()
+            p.open.return_value.get_read_available.return_value = 0
+            W.converse_session(p, "key")
+        self.assertFalse(os.path.exists(path))
+
 
 class TestVolumeState(unittest.TestCase):
     def test_a_corrupt_state_file_falls_back_to_the_default(self):
@@ -295,6 +312,30 @@ class TestCommandTurn(unittest.TestCase):
             self.assertTrue(W.cloud_reply(b"\x00\x00" * 800, "key", history))
         handled.assert_not_called()
         self.assertEqual(len(history), 2)
+
+
+class TestStreamDeadlines(unittest.TestCase):
+    """request_timeout bounds one socket read. A stream that keeps trickling
+    chunks is bounded only by the wall-clock check inside the loop, which
+    research_pass and voice_call had and these two did not."""
+
+    def test_a_command_stream_past_its_deadline_is_abandoned(self):
+        with patch.object(W, "COMMAND_DEADLINE_S", -1), \
+             patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=_reply("VOLUME_UP")):
+            self.assertIsNone(W.detect_command("Zm9v", "key"))
+
+    def test_a_phrase_past_its_deadline_is_not_cached(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "filler.wav")
+        audio = [_Chunk({"status_code": 200, "output": {"choices": [
+            {"message": {"content": [{"audio": {"data": "AAAA"}}]}}]}})]
+        with patch.object(W, "PHRASE_DEADLINE_S", -1), \
+             patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=audio):
+            self.assertFalse(W.synthesise_phrase("key", "等哈儿", path))
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".tmp"))
 
 
 class TestPlaybackTimeout(unittest.TestCase):

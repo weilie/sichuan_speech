@@ -16,7 +16,8 @@ SECS="${2:?usage: collect_wake_data.sh <name> <seconds> [pga_gain]}"
 GAIN="${3:-}"
 OUT_DIR="$HOME/sichuan/wake_data"
 OUT="$OUT_DIR/${NAME}.wav"
-CARD=2
+CARD=seeed2micvoicec   # by name, as the daemon does: the card index is
+                       # not stable across kernel updates
 
 mkdir -p "$OUT_DIR"
 

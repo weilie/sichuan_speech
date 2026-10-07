@@ -29,7 +29,6 @@ import numpy as np
 import pyaudio
 import dashscope
 import webrtcvad
-import queue
 import threading
 from zoneinfo import ZoneInfo
 from sherpa_onnx import KeywordSpotter, VadModel, VadModelConfig
@@ -41,13 +40,7 @@ KWS_MODEL_DIR = "/home/weilie/sichuan/models/sherpa-onnx-kws-zipformer-wenetspee
 KWS_KEYWORDS_FILE = "/home/weilie/sichuan/models/wake_keywords.txt"
 
 WAKE_RATE = 16000
-# Wake-word sensitivity. KWS_THRESHOLD/KWS_SCORE drive the real detector.
-# A second "loose" spotter runs on the same audio at NEARMISS_THRESHOLD so
-# an utterance that ALMOST fired gets logged instead of vanishing silently.
-# sherpa-onnx exposes no per-result score, so a parallel spotter is the only
-# way to see near misses. The second decode runs on its own thread — done
-# inline it cost the Pi 3 40% of its frame rate (51 -> 31 frames/5s), which
-# would starve the real detector. Set NEARMISS_LOGGING = False to drop it.
+# Wake-word sensitivity. KWS_THRESHOLD/KWS_SCORE drive the detector.
 # Chosen by tools/sweep_kws.py over a labelled corpus (19 beep-paced
 # utterances + 3 min of room audio): 17/19 recall with ZERO false alarms.
 # The sweep found no false alarm anywhere in the grid, even at the most
@@ -55,7 +48,14 @@ WAKE_RATE = 16000
 # so sensitivity is set high. That 17/19 sweep was taken at the default beam
 # width and its two "missed at every setting" utterances turned out to be the
 # beam, not the model (see KWS_MAX_ACTIVE_PATHS below). Re-run the sweep before
-# changing these.
+# changing these. The tools read these constants and build_kws() from this
+# module (via tools/_daemon.py), so a sweep is always of the detector that
+# actually ships.
+# (A second "near-miss" spotter at looser settings used to decode the same
+# audio on its own thread to log utterances that almost fired. Removed
+# 2026-10-07: it had reported nothing useful since the beam change, and its
+# decode thread was pure cost. It is in git history if the tuning is ever
+# loosened again.)
 KWS_SCORE = 4.0
 # Capture gain, applied at every start. This is the highest-impact setting in
 # the whole wake path: replaying the corpus at simulated gains gives 63%
@@ -81,13 +81,6 @@ KWS_THRESHOLD = 0.05
 # RTF 0.349 at beam 4 vs 0.360 at beam 16 — the zipformer encoder dominates
 # and the beam search is rounding error next to it.
 KWS_MAX_ACTIVE_PATHS = 16
-# Off: the live detector sits at 4.0/0.05 and score/threshold are nearly flat
-# next to beam width, so the watcher has not told us anything since, and its
-# second decode thread is pure cost. Flip back on only if the live tuning is
-# loosened again.
-NEARMISS_LOGGING = False
-NEARMISS_SCORE = 2.5
-NEARMISS_THRESHOLD = 0.10
 WAKE_CHUNK = 1600              # 100 ms @ 16 kHz
 
 CONV_RATE_IN = 16000
@@ -247,6 +240,10 @@ SPEC_WAIT_TIMEOUT_S = 12
 REQUEST_TIMEOUT_S = 10
 RESEARCH_DEADLINE_S = 20
 VOICE_DEADLINE_S = 30
+# Boot-time synthesis of one cached phrase. Not on the turn path, but it runs
+# before the wake loop, so a stream that trickles here is a device that never
+# starts listening. One short sentence of audio arrives in ~2 s.
+PHRASE_DEADLINE_S = 20
 # A search turn costs ~6 s in pass 1 alone, so say something out loud rather
 # than leaving an elderly listener in silence. Non-search turns come back in
 # ~1.5 s and never reach the timer.
@@ -732,6 +729,7 @@ def synthesise_phrase(api_key, phrase, path):
     The prompt has to forbid embellishment: this is a chat model being used as
     a synthesiser, and left alone it answers the sentence instead of reading
     it."""
+    t0 = time.monotonic()
     chunks = []
     for resp in dashscope.MultiModalConversation.call(
         api_key=api_key, model=MODEL,
@@ -740,8 +738,15 @@ def synthesise_phrase(api_key, phrase, path):
         modalities=["text", "audio"], audio={"voice": VOICE, "format": "wav"},
         # Ten of these run before the wake loop on a first boot. Without a
         # timeout one hung stream keeps the daemon from ever listening.
+        # request_timeout bounds one socket read; the deadline check below
+        # bounds the whole stream, as in research_pass.
         request_timeout=REQUEST_TIMEOUT_S,
         result_format="message", stream=True):
+        if time.monotonic() - t0 > PHRASE_DEADLINE_S:
+            # Return, not break: a partial phrase must never reach the cache.
+            print(f"[boot] synthesis of {phrase!r} exceeded "
+                  f"{PHRASE_DEADLINE_S}s — skipping it this boot.", flush=True)
+            return False
         j = json.loads(str(resp))
         for ch in (j.get("output") or {}).get("choices", []) or []:
             for c in ch.get("message", {}).get("content", []):
@@ -1071,6 +1076,12 @@ def detect_command(audio_b64, api_key):
             max_tokens=COMMAND_MAX_TOKENS,
             request_timeout=REQUEST_TIMEOUT_S,
             result_format="message", stream=True):
+            if time.monotonic() - t0 > COMMAND_DEADLINE_S:
+                # result() has already given up on this verdict; stop paying
+                # for a stream nobody is waiting on.
+                print(f"[command] deadline {COMMAND_DEADLINE_S}s exceeded — "
+                      f"abandoning.", flush=True)
+                return None
             j = json.loads(str(resp))
             status = j.get("status_code")
             if status and status != 200:
@@ -1335,6 +1346,13 @@ def converse_session(p, api_key):
     vad = build_vad()
     # Fresh history per session: a new wake word starts a new conversation.
     history = []
+    # And nothing to repeat yet. RESPONSE_WAV outlives the session that wrote
+    # it, so without this "再说一遍" on a fresh wake replayed an answer from
+    # hours earlier instead of saying there is nothing to repeat.
+    try:
+        os.remove(RESPONSE_WAV)
+    except OSError:
+        pass
     turn = 0
     dead_turns = 0
     cloud_turns = 0
@@ -1444,58 +1462,21 @@ def converse_session(p, api_key):
             return
 
 
-class NearMissWatcher:
-    """Runs a deliberately over-sensitive copy of the spotter on a worker
-    thread. When it fires and the live detector did not, the phrase was
-    spoken and rejected on threshold — which is the thing the logs could
-    not distinguish from silence before. Diagnostic only: it never wakes
-    the device. Frames are dropped rather than queued without bound, so a
-    slow decode degrades this watcher and never the real detector."""
-
-    def __init__(self):
-        self.q = queue.Queue(maxsize=40)
-        self.last_detection = 0.0
-        self.dropped = 0
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def feed(self, audio_f32, peak_rms):
-        try:
-            self.q.put_nowait((audio_f32, peak_rms))
-        except queue.Full:
-            self.dropped += 1
-
-    def note_detection(self):
-        self.last_detection = time.monotonic()
-
-    def _run(self):
-        spotter = build_kws(NEARMISS_SCORE, NEARMISS_THRESHOLD)
-        stream = spotter.create_stream()
-        while True:
-            audio_f32, peak_rms = self.q.get()
-            stream.accept_waveform(WAKE_RATE, audio_f32)
-            while spotter.is_ready(stream):
-                spotter.decode_stream(stream)
-            if not spotter.get_result(stream):
-                continue
-            spotter.reset_stream(stream)
-            # The live detector fires first; anything within 2 s of a real
-            # wake is that same utterance, not a miss.
-            if time.monotonic() - self.last_detection < 2.0:
-                continue
-            print(f"[wake] NEAR-MISS: heard at threshold={NEARMISS_THRESHOLD}/"
-                  f"score={NEARMISS_SCORE}, rejected by live "
-                  f"{KWS_THRESHOLD}/{KWS_SCORE} (peak_rms={peak_rms}, "
-                  f"dropped_frames={self.dropped})", flush=True)
-
-
-def build_kws(keywords_score=KWS_SCORE, keywords_threshold=KWS_THRESHOLD):
+def build_kws(keywords_score=KWS_SCORE, keywords_threshold=KWS_THRESHOLD,
+              model_dir=KWS_MODEL_DIR, keywords_file=KWS_KEYWORDS_FILE,
+              num_threads=1):
+    """The wake-word spotter, at the shipped setting unless told otherwise.
+    tools/ build theirs through this too (with a Mac copy of the model, or
+    more threads for a faster sweep), so the beam width and keyword file a
+    sweep measures are the ones the daemon runs. Threads change speed only;
+    the decode is deterministic."""
     return KeywordSpotter(
-        tokens=f"{KWS_MODEL_DIR}/tokens.txt",
-        encoder=f"{KWS_MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        decoder=f"{KWS_MODEL_DIR}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        joiner=f"{KWS_MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=KWS_KEYWORDS_FILE,
-        num_threads=1,
+        tokens=f"{model_dir}/tokens.txt",
+        encoder=f"{model_dir}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        decoder=f"{model_dir}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        joiner=f"{model_dir}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+        keywords_file=keywords_file,
+        num_threads=num_threads,
         max_active_paths=KWS_MAX_ACTIVE_PATHS,
         keywords_score=keywords_score,
         keywords_threshold=keywords_threshold,
@@ -1527,11 +1508,15 @@ def main():
 
     print("[boot] loading sherpa-onnx KeywordSpotter (麻婆豆腐)...", flush=True)
     kws = build_kws()
-    nearmiss = NearMissWatcher() if NEARMISS_LOGGING else None
 
     p = pyaudio.PyAudio()
 
     while True:
+        # A session can end while a holding phrase is still inside aplay (the
+        # timer fired, then both cloud paths failed fast). Opening input on
+        # the half-duplex codec at that moment raises OSError out of main().
+        # Same guard the turn loop has.
+        wait_for_audio_idle()
         print("[boot] opening mic for wake word + warming up...", flush=True)
         wake_stream = p.open(
             format=pyaudio.paInt16, channels=1, rate=WAKE_RATE,
@@ -1556,7 +1541,7 @@ def main():
                 audio_i16 = np.frombuffer(data, dtype=np.int16)
                 # peak RMS for visibility
                 if len(audio_i16) > 0:
-                    rms = int(math.sqrt(float(np.mean(audio_i16.astype(np.int64) ** 2))))
+                    rms = pcm_rms(data)
                     if rms > peak_rms_w: peak_rms_w = rms
                     # Samples pinned near full scale mean the ADC is
                     # saturating: the waveform the model sees is a
@@ -1570,8 +1555,6 @@ def main():
                 while kws.is_ready(kws_stream):
                     kws.decode_stream(kws_stream)
                 result = kws.get_result(kws_stream)
-                if nearmiss is not None:
-                    nearmiss.feed(audio_f32, peak_rms_w)
                 frames_w += 1
                 if time.monotonic() - last_stats >= 5.0:
                     clip_pct = (100.0 * clipped_w / samples_w) if samples_w else 0.0
@@ -1580,15 +1563,13 @@ def main():
                     frames_w = 0; peak_rms_w = 0; clipped_w = 0; samples_w = 0
                     last_stats = time.monotonic()
                 if result:
-                    if nearmiss is not None:
-                        nearmiss.note_detection()
                     print(f"\n*** WAKE detected ({result!r}) — opening session ***", flush=True)
                     log_stage("wake", "detected", result=repr(result))
                     # Free codec for the conversation
                     log_stage("wake", "closing wake mic")
                     wake_stream.stop_stream(); wake_stream.close(); wake_stream = None
                     log_stage("wake", "ack start")
-                    ack_ok = play_wav("/tmp/ack.wav")
+                    ack_ok = play_wav(BEEP_ACK)
                     log_stage("wake", "ack done", ok=ack_ok)
                     converse_session(p, api_key)
                     print("[session] done. resuming wake-word listening.\n", flush=True)

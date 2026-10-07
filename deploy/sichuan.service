@@ -1,7 +1,7 @@
 [Unit]
 Description=Sichuan smart-speaker (wake word + converse loop)
-After=network-online.target
-Wants=network-online.target
+# No After=network-online.target: the user manager has no such target, so it
+# did nothing. Boot tolerates a missing network (see docs/deployment.md).
 
 [Service]
 Type=simple

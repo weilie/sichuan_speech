@@ -16,27 +16,20 @@ stays with the human until after the verdicts are read out.
 """
 import argparse, os, wave
 import numpy as np
-from sherpa_onnx import KeywordSpotter
+from _daemon import W
 
-MODEL_DIR = "/home/weilie/sichuan/models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
-KEYWORDS = "/home/weilie/sichuan/models/wake_keywords.txt"
 DATA_DIR = os.path.expanduser("~/sichuan/wake_data")
-RATE = 16000
-CHUNK = 1600          # 100 ms, same as the live loop
+RATE = W.WAKE_RATE
+CHUNK = W.WAKE_CHUNK  # 100 ms, same as the live loop
 MIN_GAP_S = 1.0       # two hits closer than this are one utterance
 BEEP_LEN_S = 0.35     # the beep itself is not speech; skip it
 LATE_TOLERANCE_S = 0.6  # the spotter fires at the END of the phrase
 
 
 def build(score, threshold):
-    return KeywordSpotter(
-        tokens=f"{MODEL_DIR}/tokens.txt",
-        encoder=f"{MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        decoder=f"{MODEL_DIR}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        joiner=f"{MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=KEYWORDS, num_threads=2, max_active_paths=16,
-        keywords_score=score, keywords_threshold=threshold,
-        num_trailing_blanks=1, provider="cpu")
+    # The daemon's own builder: same model, keyword file and beam width as
+    # the live detector. Two threads only make the replay faster.
+    return W.build_kws(score, threshold, num_threads=2)
 
 
 def detections(spotter, audio):
@@ -59,8 +52,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
     ap.add_argument("--window", type=float, default=5.0)
-    ap.add_argument("--score", type=float, default=4.0)
-    ap.add_argument("--thresh", type=float, default=0.05)
+    ap.add_argument("--score", type=float, default=W.KWS_SCORE)
+    ap.add_argument("--thresh", type=float, default=W.KWS_THRESHOLD)
     a = ap.parse_args()
 
     wav_path = f"{DATA_DIR}/{a.name}.wav"
