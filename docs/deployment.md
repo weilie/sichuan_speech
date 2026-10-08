@@ -45,6 +45,14 @@ scp src/wake_then_converse.py weilie@sichuan-pi.local:~/sichuan/wake_then_conver
 ssh weilie@sichuan-pi.local 'systemctl --user daemon-reload && systemctl --user restart sichuan.service'
 ```
 
+The measurement tools are not part of the service. When one is needed on
+the Pi, copy the directory whole — they import the deployed daemon through
+`tools/_daemon.py`, so a single tool copied on its own fails to import:
+
+```bash
+scp -r tools weilie@sichuan-pi.local:~/sichuan/
+```
+
 ## First-time setup on the Pi
 
 ```bash

@@ -14,14 +14,22 @@ inline in items 2, 3, 4, 9, 14, 15), item 11 moved from P2 to P3, and the
 fan-out claim under Verified given its proper scope. No finding was
 overturned.
 
-**Status (2026-10-07):** implemented in the working tree, except three items
-left on purpose: the `endpoint()` timeout semantics (item 15, changing it
-needs a corpus run), the per-session Silero reload (item 15, unmeasured), and
-the Y-wall port branch (item 13, waits for the v16 measurement). One
-deviation from item 3's fix: the shared KWS code stays in the daemon and the
-tools reach it through `tools/_daemon.py` rather than a new `src/kws.py`.
-The Pi runs a single copied file, and a second module would be one more
-thing a redeploy can forget 1000 km away.
+**Status (2026-10-07):** implemented on branch `review-fixes-2026-10`, except
+three items left on purpose: the `endpoint()` timeout semantics (item 15,
+changing it needs a corpus run), the per-session Silero reload (item 15,
+unmeasured), and the Y-wall port branch (item 13, waits for the v16
+measurement). One deviation from item 3's fix: the shared KWS code stays in
+the daemon and the tools reach it through `tools/_daemon.py` rather than a
+new `src/kws.py`; the Pi runs a single copied file, and a second module
+would be one more thing a redeploy can forget 1000 km away. An independent
+agent then reviewed the branch and found two regressions in the first
+implementation (items 1 and 4, corrected as described there) plus: mic opens
+now go through `open_input()` under `AUDIO_LOCK` instead of a wait at each
+call site; the noise gate is one function, `gate_reason()` /
+`passes_gate()`, used by the daemon and imported by the tools;
+`sweep_vad.py` builds one VAD per setting and resets it per capture;
+`sweep_kws.py` builds one spotter per cell; the deployment guide says to
+copy `tools/` whole because of `_daemon.py`.
 
 Priority scale:
 
@@ -37,8 +45,10 @@ Priority scale:
 - `PYTHONPATH=src python3 -m unittest discover -s tests`: 33 tests, all pass.
 - `enclosure/base.stl` and `enclosure/lid.stl` are byte-identical to a fresh
   OpenSCAD render of the working-tree `case.scad`; both render with no
-  warnings. The v16 numbers in `docs/next-session.md` (20 slots of 2 × 14 mm,
-  lid corner radius 10, 6 mm top fillet) match what the file produces.
+  warnings. The v16 numbers in `docs/next-session.md` match what the file
+  produces: as finally fixed (item 4), 20 slots of 2 × 14 mm on a 4.07 mm
+  pitch with a slot centred on both measured mics, lid corner radius 10,
+  6 mm top fillet.
 - The t=0 fan-out in `cloud_reply` (speculative voice, research, command
   watcher, holding phrase) was traced for races. Within `cloud_reply` and
   `converse_session`, the `CommandWatcher` lock, the `search_fired` event and
@@ -58,9 +68,13 @@ Priority scale:
   wake replays an answer from hours or days ago. The "我刚才还没说啥子喃" line
   is only heard before the first successful answer since boot (`/tmp` is
   cleared at boot), never at the start of a later session.
-- **Fix:** at the top of `converse_session`, before the loop:
-  `try: os.remove(RESPONSE_WAV) except OSError: pass`. Add a test in
-  `TestRepeat` that a new session starts with nothing to repeat.
+- **Fix:** a staleness bound, not deletion. `handle_command` replays the
+  file only if its mtime is within `REPEAT_MAX_AGE_S` (10 min); older says
+  nothing to repeat. The first attempt deleted the file at session start,
+  which an independent review caught as a regression: `docs/next-session.md`
+  §3 records cross-session replay as deliberate, and the common case is a
+  listener who missed an answer, let the 6 s window close, and wakes the
+  device to ask again.
 
 ### 2. Wake mic reopened while audio may still be playing
 
@@ -74,8 +88,11 @@ Priority scale:
   of 10-15 s, unmeasured. The journal shows an `OSError` traceback at
   `p.open` with nothing linking it to the holding phrase. The turn loop
   already guards this at line 1353; the session-to-wake transition does not.
-- **Fix:** call `wait_for_audio_idle()` immediately before `wake_stream =
-  p.open(...)` in `main()`.
+- **Fix:** every mic open goes through one helper, `open_input()`, which
+  takes `AUDIO_LOCK` around `p.open`. The first attempt added a
+  `wait_for_audio_idle()` call before the wake-mic open, mirroring the turn
+  loop; the independent review pointed out that a per-call-site wait is a
+  convention a third mic open can forget, so the lock moved into the helper.
 
 ### 3. The wake tools hard-code the live KWS setting
 
@@ -110,12 +127,12 @@ Priority scale:
   the corner puts that mic behind solid wall. Whether 1-3 mm of wall matters
   acoustically is unproven either way. This affects the print you are about
   to make, hence P1 by timing, not severity.
-- **Fix:** the corner arc ends at y = 8, so `y_lo = base_r + 0.5` is still in
-  flat wall. That yields 21 slots starting at y = 8.5 and gives the first mic
-  2 mm of band on its corner side. It does not centre a slot on the mic: the
-  mics are 61 mm apart, not a multiple of the 4 mm pitch, so no offset
-  centres both, and a 4.067 mm pitch (15 pitches between mics) is the only
-  way to do that. Extend the band, then let the lid-closed corpus decide.
+- **Fix:** anchor slot 0 on the first mic and derive the pitch from the mic
+  spacing (15 pitches over 61 mm, 4.067 mm), so a slot is centred on both
+  measured positions; 20 slots from y = 9.5 to 88.8. The first attempt only
+  moved the band's start to 8.5 at a fixed 4 mm pitch, which an independent
+  review caught: that put the second mic (71.5) dead behind a rib, where the
+  original clamp had it at a slot centre.
 
 ## P2
 

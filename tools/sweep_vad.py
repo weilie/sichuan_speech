@@ -67,8 +67,12 @@ def capture_per_beep(path, marks, mkvad, end_silence_ms, window, beep_guard):
     the silence counter from ever advancing.
     """
     out = []
+    vad = mkvad()
     for m in marks:
-        vad = mkvad()   # fresh per capture, as the device resets between turns
+        # As the device does between turns: one model, reset() per capture.
+        # (webrtcvad has no reset and the device reuses it across turns too.)
+        if hasattr(vad, "reset"):
+            vad.reset()
         frames = wav_frames(path, m + beep_guard, m + window)
         audio, reason, st = W.endpoint(frames, vad, window,
                                        end_silence_ms=end_silence_ms)
@@ -82,11 +86,8 @@ def capture_per_beep(path, marks, mkvad, end_silence_ms, window, beep_guard):
 
 
 def passes_gate(audio, st):
-    """The same test converse_session applies before spending a cloud call."""
-    utt_ms = len(audio) * 1000 // (W.CONV_RATE_IN * 2)
-    return (utt_ms >= W.MIN_UTTERANCE_MS
-            and st["longest_run_ms"] >= W.MIN_VOICED_RUN_MS
-            and st["voiced_ratio"] >= W.MIN_VOICED_RATIO)
+    """The device's own gate (wake_then_converse.passes_gate), not a copy."""
+    return W.passes_gate(len(audio) * 1000 // (W.CONV_RATE_IN * 2), st)
 
 
 def captures(path, mkvad, end_silence_ms, silence_timeout_s=600.0):
@@ -105,6 +106,10 @@ def captures(path, mkvad, end_silence_ms, silence_timeout_s=600.0):
     src = counting()
     while True:
         before = consumed[0]
+        # Each capture stands for one device turn, so reset the VAD as the
+        # device does: no state carries from one capture into the next.
+        if hasattr(vad, "reset"):
+            vad.reset()
         audio, reason, st = W.endpoint(src, vad, silence_timeout_s,
                                        end_silence_ms=end_silence_ms)
         if reason != "speech" or not audio:

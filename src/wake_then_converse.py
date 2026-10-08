@@ -428,6 +428,12 @@ SICHUAN_SYSTEM_PROMPT = (
 )
 RECORDING_WAV = "/tmp/wake_recording.wav"
 RESPONSE_WAV = "/tmp/wake_response.wav"
+# How long the last reply stays available to 再说一遍. RESPONSE_WAV outlives
+# the session that wrote it ON PURPOSE: someone who missed an answer, let the
+# 6 s follow-up window close and woke the device again must still be able to
+# ask for it. But a reply from this morning is not "刚才", and the
+# acknowledgement says exactly that, so past this age it is not replayed.
+REPEAT_MAX_AGE_S = 600
 
 
 def log_stage(stage, message, **fields):
@@ -494,13 +500,16 @@ def play_wav(path):
         return _aplay(path)
 
 
-def wait_for_audio_idle():
-    """Block until nothing is playing. Called before opening the mic: the
-    holding phrase runs on its own thread and can still be emitting when a
-    turn ends, and opening input while the speaker runs is exactly what the
-    half-duplex codec cannot do."""
+def open_input(p, rate, chunk):
+    """The one way this process opens the mic. Done under AUDIO_LOCK so the
+    open cannot overlap an aplay: the holding phrase runs on its own thread
+    and can still be emitting when a turn or a whole session ends, and
+    opening input while the speaker runs is exactly what the half-duplex
+    codec cannot do -- it raises OSError, which would escape main(). A lock
+    rather than a wait at each call site, so a new mic open cannot forget it."""
     with AUDIO_LOCK:
-        pass
+        return p.open(format=pyaudio.paInt16, channels=1, rate=rate,
+                      input=True, frames_per_buffer=chunk)
 
 
 class HoldingPhrase:
@@ -697,6 +706,26 @@ def endpoint(frames, vad, silence_timeout_s,
     # Offline only: the frame source ended. Live, stream_frames never stops.
     return (b"".join(captured) if in_speech else b""), \
            ("speech" if in_speech else "timeout"), stats("source_ended")
+
+
+def gate_reason(utt_ms, stats, min_ms=None, run_ms=None, ratio=None):
+    """Why a capture is rejected before it costs a cloud call, or None if it
+    passes. This is THE noise gate: converse_session applies it, and the
+    tools import it (through tools/_daemon.py) with the thresholds
+    overridable, so a sweep measures other settings against exactly the test
+    the device runs rather than a copy of it. MIN_UTTERANCE_MS,
+    MIN_VOICED_RUN_MS and MIN_VOICED_RATIO above say why each threshold is
+    where it is."""
+    if utt_ms < (MIN_UTTERANCE_MS if min_ms is None else min_ms):
+        return "too short"
+    if (stats["longest_run_ms"] < (MIN_VOICED_RUN_MS if run_ms is None else run_ms)
+            or stats["voiced_ratio"] < (MIN_VOICED_RATIO if ratio is None else ratio)):
+        return "no speech-like voicing"
+    return None
+
+
+def passes_gate(utt_ms, stats, **thresholds):
+    return gate_reason(utt_ms, stats, **thresholds) is None
 
 
 def set_capture_gain():
@@ -1182,7 +1211,11 @@ def handle_command(tag):
     A command never joins the history. It is not part of the conversation, and
     replaying it would invite the model to discuss it on the next turn."""
     if tag == "REPEAT":
-        if os.path.exists(RESPONSE_WAV):
+        try:
+            age = time.time() - os.path.getmtime(RESPONSE_WAV)
+        except OSError:
+            age = None
+        if age is not None and age <= REPEAT_MAX_AGE_S:
             return play_wav(RESPONSE_WAV)
         return play_ack("nothing_to_repeat")
     step = VOLUME_STEP if tag == "VOLUME_UP" else -VOLUME_STEP
@@ -1345,14 +1378,8 @@ def converse_session(p, api_key):
     session ends; caller resumes wake-word listening."""
     vad = build_vad()
     # Fresh history per session: a new wake word starts a new conversation.
+    # (The last reply is deliberately NOT cleared here; see REPEAT_MAX_AGE_S.)
     history = []
-    # And nothing to repeat yet. RESPONSE_WAV outlives the session that wrote
-    # it, so without this "再说一遍" on a fresh wake replayed an answer from
-    # hours earlier instead of saying there is nothing to repeat.
-    try:
-        os.remove(RESPONSE_WAV)
-    except OSError:
-        pass
     turn = 0
     dead_turns = 0
     cloud_turns = 0
@@ -1363,17 +1390,12 @@ def converse_session(p, api_key):
         turn += 1
         if hasattr(vad, "reset"):
             vad.reset()
-        # The holding-phrase timer fires on its own thread and can still be
-        # emitting when a turn ends early (a failed call, a dead turn). Opening
-        # input on a half-duplex codec while it plays either raises OSError —
-        # which escapes main(), killing the daemon — or lets the device hear
-        # its own voice.
-        wait_for_audio_idle()
         log_stage("turn", "opening conversation mic", turn=turn)
-        stream = p.open(
-            format=pyaudio.paInt16, channels=1, rate=CONV_RATE_IN,
-            input=True, frames_per_buffer=VAD_FRAME_SAMPLES,
-        )
+        # Under AUDIO_LOCK (see open_input): the holding-phrase timer can
+        # still be emitting when a turn ends early (a failed call, a dead
+        # turn), and opening input over it would raise OSError or let the
+        # device hear its own voice.
+        stream = open_input(p, CONV_RATE_IN, VAD_FRAME_SAMPLES)
         # Discard the first N seconds after opening the mic. aplay can
         # return before the codec buffer is fully drained, so speaker
         # audio may still be emitting for a moment; plus room echo of
@@ -1428,12 +1450,9 @@ def converse_session(p, api_key):
         print(f"[turn {turn}] captured {utt_ms/1000:.1f}s "
               f"(~{speech_ms}ms speech, voiced {st['voiced_ratio']*100:.0f}%, "
               f"longest run {st['longest_run_ms']}ms).", flush=True)
-        too_short = utt_ms < MIN_UTTERANCE_MS
-        not_speechlike = (st["longest_run_ms"] < MIN_VOICED_RUN_MS
-                          or st["voiced_ratio"] < MIN_VOICED_RATIO)
-        if too_short or not_speechlike:
+        why = gate_reason(utt_ms, st)
+        if why:
             dead_turns += 1
-            why = "too short" if too_short else "no speech-like voicing"
             print(f"[turn {turn}] {why} — treating as noise, no cloud call "
                   f"(dead {dead_turns}/{MAX_CONSECUTIVE_DEAD_TURNS}).", flush=True)
             if dead_turns >= MAX_CONSECUTIVE_DEAD_TURNS:
@@ -1512,16 +1531,11 @@ def main():
     p = pyaudio.PyAudio()
 
     while True:
-        # A session can end while a holding phrase is still inside aplay (the
-        # timer fired, then both cloud paths failed fast). Opening input on
-        # the half-duplex codec at that moment raises OSError out of main().
-        # Same guard the turn loop has.
-        wait_for_audio_idle()
         print("[boot] opening mic for wake word + warming up...", flush=True)
-        wake_stream = p.open(
-            format=pyaudio.paInt16, channels=1, rate=WAKE_RATE,
-            input=True, frames_per_buffer=WAKE_CHUNK,
-        )
+        # Under AUDIO_LOCK (see open_input): a session can end while a
+        # holding phrase is still inside aplay (the timer fired, then both
+        # cloud paths failed fast).
+        wake_stream = open_input(p, WAKE_RATE, WAKE_CHUNK)
         t = time.monotonic()
         while time.monotonic() - t < WARMUP_SECS:
             wake_stream.read(WAKE_CHUNK, exception_on_overflow=False)

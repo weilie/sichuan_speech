@@ -110,12 +110,14 @@ def main():
     best = []
     for score in scores:
         for thr in thresholds:
-            hits = detections(build(score, thr, args.model_dir, args.keywords), pos)
+            # One spotter per cell: detections() keeps its state in the
+            # stream it creates, so positives and negatives can share it.
+            spotter = build(score, thr, args.model_dir, args.keywords)
+            hits = detections(spotter, pos)
             missed = score_windows(hits, windows)
             got = len(windows) - len(missed)
             recall = got / len(windows) if windows else 0.0
-            false = (len(detections(build(score, thr, args.model_dir, args.keywords), neg))
-                     if neg is not None else -1)
+            false = len(detections(spotter, neg)) if neg is not None else -1
             if not missed and false == 0:
                 best.append((score, thr))
             note = "none  <== clean" if not missed and false == 0 else (

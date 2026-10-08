@@ -222,34 +222,50 @@ class TestVolumeCommands(unittest.TestCase):
 
 
 class TestRepeat(unittest.TestCase):
-    def test_repeat_replays_the_last_reply(self):
-        with patch.object(W.os.path, "exists", return_value=True), \
+    """The last reply stays available across a session boundary -- someone who
+    missed it and let the session close must be able to wake the device and
+    ask again -- but only for REPEAT_MAX_AGE_S; after that it is not 刚才."""
+
+    def test_repeat_replays_a_recent_reply(self):
+        import time
+        with patch.object(W.os.path, "getmtime", return_value=time.time() - 30), \
              patch.object(W, "play_wav", return_value=True) as play:
             self.assertTrue(W.handle_command("REPEAT"))
         play.assert_called_once_with(W.RESPONSE_WAV)
 
     def test_repeat_with_nothing_to_replay_says_so(self):
-        with patch.object(W.os.path, "exists", return_value=False), \
+        with patch.object(W.os.path, "getmtime", side_effect=OSError), \
              patch.object(W, "play_ack", return_value=True) as ack:
             self.assertTrue(W.handle_command("REPEAT"))
         ack.assert_called_once_with("nothing_to_repeat")
 
-    def test_a_new_session_starts_with_nothing_to_repeat(self):
-        # RESPONSE_WAV outlives the session that wrote it; left alone, "再说一遍"
-        # on a fresh wake replayed an answer from hours earlier.
-        import tempfile
-        path = os.path.join(tempfile.mkdtemp(), "response.wav")
-        open(path, "wb").close()
-        silent = (b"", "timeout", {"stop_reason": "silence_timeout_before_speech"})
-        with patch.object(W, "RESPONSE_WAV", path), \
-             patch.object(W, "build_vad", return_value=MagicMock()), \
-             patch.object(W, "wait_for_audio_idle"), \
-             patch.object(W, "POST_ACK_MIC_DISCARD_S", 0), \
-             patch.object(W, "record_utterance", return_value=silent):
-            p = MagicMock()
-            p.open.return_value.get_read_available.return_value = 0
-            W.converse_session(p, "key")
-        self.assertFalse(os.path.exists(path))
+    def test_a_stale_reply_is_not_repeated(self):
+        import time
+        with patch.object(W.os.path, "getmtime",
+                          return_value=time.time() - W.REPEAT_MAX_AGE_S - 1), \
+             patch.object(W, "play_wav") as play, \
+             patch.object(W, "play_ack", return_value=True) as ack:
+            self.assertTrue(W.handle_command("REPEAT"))
+        play.assert_not_called()
+        ack.assert_called_once_with("nothing_to_repeat")
+
+
+class TestNoiseGate(unittest.TestCase):
+    """One gate, applied by converse_session and imported by the tools."""
+
+    def test_the_shipped_thresholds_apply_by_default(self):
+        good = {"voiced_ratio": 0.5, "longest_run_ms": 600}
+        self.assertIsNone(W.gate_reason(1500, good))
+        self.assertEqual(W.gate_reason(W.MIN_UTTERANCE_MS - 1, good), "too short")
+        self.assertEqual(W.gate_reason(1500, {"voiced_ratio": 0.5, "longest_run_ms": 240}),
+                         "no speech-like voicing")
+
+    def test_a_sweep_can_override_each_threshold(self):
+        st = {"voiced_ratio": 0.2, "longest_run_ms": 500}
+        self.assertTrue(W.passes_gate(1500, st))
+        self.assertFalse(W.passes_gate(1500, st, run_ms=700))
+        self.assertFalse(W.passes_gate(1500, st, ratio=0.25))
+        self.assertFalse(W.passes_gate(1500, st, min_ms=2000))
 
 
 class TestVolumeState(unittest.TestCase):
@@ -366,7 +382,6 @@ class TestSessionCap(unittest.TestCase):
         st = {"voiced_ratio": 0.9, "longest_run_ms": 1000}
         speech = (b"\x00\x00" * 16000, "speech", st)
         with patch.object(W, "build_vad", return_value=MagicMock()), \
-             patch.object(W, "wait_for_audio_idle"), \
              patch.object(W, "pcm_rms", return_value=0), \
              patch.object(W, "POST_ACK_MIC_DISCARD_S", 0), \
              patch.object(W, "record_utterance", return_value=speech), \

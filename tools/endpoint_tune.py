@@ -49,11 +49,8 @@ def captures(mkvad, names):
 
 
 def passes(cap, run_ms, ratio):
-    if cap is None:
-        return False
-    utt_ms, st = cap
-    return not (utt_ms < W.MIN_UTTERANCE_MS or st["longest_run_ms"] < run_ms
-                or st["voiced_ratio"] < ratio)
+    # The device's own gate, with the two thresholds under sweep overridden.
+    return cap is not None and W.passes_gate(cap[0], cap[1], run_ms=run_ms, ratio=ratio)
 
 
 def main():

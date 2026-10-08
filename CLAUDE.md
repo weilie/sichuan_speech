@@ -29,8 +29,10 @@
 - `src/utils.py`, `src/transcribe.py`, `src/synthesize.py` — ASR / TTS
   CLIs and the shared API-key setup.
 - `tools/` — measurement scripts (wake / VAD sweeps, corpus recording,
-  `usage-report.sh`). Most import `wake_then_converse` and expect the Pi's
-  `~/sichuan` paths.
+  `usage-report.sh`). The Python ones import the daemon through
+  `tools/_daemon.py` for its constants, `build_kws()`, `SileroVad` and
+  `passes_gate()`, so a sweep measures what ships; copy the directory
+  whole to the Pi. They expect the Pi's `~/sichuan` paths.
 - `deploy/sichuan.service` — the systemd user unit; see `docs/deployment.md`.
 - `enclosure/case.scad` — OpenSCAD source of truth for the enclosure.
   Rendered STLs (`enclosure/base.stl`, `enclosure/lid.stl`) are
