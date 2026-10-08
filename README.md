@@ -26,8 +26,7 @@ for the roadmap and `docs/deployment.md` for running it on the Pi.
 ```bash
 pip install -r requirements.txt
 ```
-The smart speaker also needs `numpy` and `sherpa-onnx`, plus the model files
-listed in `docs/deployment.md`. The other scripts do not.
+The smart speaker also needs the model files listed in `docs/deployment.md`.
 
 ### 2. Configure API Key
 Get your API key from [Alibaba Cloud Model Studio](https://dashscope.console.aliyun.com/apiKey)

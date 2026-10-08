@@ -222,17 +222,50 @@ class TestVolumeCommands(unittest.TestCase):
 
 
 class TestRepeat(unittest.TestCase):
-    def test_repeat_replays_the_last_reply(self):
-        with patch.object(W.os.path, "exists", return_value=True), \
+    """The last reply stays available across a session boundary -- someone who
+    missed it and let the session close must be able to wake the device and
+    ask again -- but only for REPEAT_MAX_AGE_S; after that it is not 刚才."""
+
+    def test_repeat_replays_a_recent_reply(self):
+        import time
+        with patch.object(W.os.path, "getmtime", return_value=time.time() - 30), \
              patch.object(W, "play_wav", return_value=True) as play:
             self.assertTrue(W.handle_command("REPEAT"))
         play.assert_called_once_with(W.RESPONSE_WAV)
 
     def test_repeat_with_nothing_to_replay_says_so(self):
-        with patch.object(W.os.path, "exists", return_value=False), \
+        with patch.object(W.os.path, "getmtime", side_effect=OSError), \
              patch.object(W, "play_ack", return_value=True) as ack:
             self.assertTrue(W.handle_command("REPEAT"))
         ack.assert_called_once_with("nothing_to_repeat")
+
+    def test_a_stale_reply_is_not_repeated(self):
+        import time
+        with patch.object(W.os.path, "getmtime",
+                          return_value=time.time() - W.REPEAT_MAX_AGE_S - 1), \
+             patch.object(W, "play_wav") as play, \
+             patch.object(W, "play_ack", return_value=True) as ack:
+            self.assertTrue(W.handle_command("REPEAT"))
+        play.assert_not_called()
+        ack.assert_called_once_with("nothing_to_repeat")
+
+
+class TestNoiseGate(unittest.TestCase):
+    """One gate, applied by converse_session and imported by the tools."""
+
+    def test_the_shipped_thresholds_apply_by_default(self):
+        good = {"voiced_ratio": 0.5, "longest_run_ms": 600}
+        self.assertIsNone(W.gate_reason(1500, good))
+        self.assertEqual(W.gate_reason(W.MIN_UTTERANCE_MS - 1, good), "too short")
+        self.assertEqual(W.gate_reason(1500, {"voiced_ratio": 0.5, "longest_run_ms": 240}),
+                         "no speech-like voicing")
+
+    def test_a_sweep_can_override_each_threshold(self):
+        st = {"voiced_ratio": 0.2, "longest_run_ms": 500}
+        self.assertTrue(W.passes_gate(1500, st))
+        self.assertFalse(W.passes_gate(1500, st, run_ms=700))
+        self.assertFalse(W.passes_gate(1500, st, ratio=0.25))
+        self.assertFalse(W.passes_gate(1500, st, min_ms=2000))
 
 
 class TestVolumeState(unittest.TestCase):
@@ -297,6 +330,30 @@ class TestCommandTurn(unittest.TestCase):
         self.assertEqual(len(history), 2)
 
 
+class TestStreamDeadlines(unittest.TestCase):
+    """request_timeout bounds one socket read. A stream that keeps trickling
+    chunks is bounded only by the wall-clock check inside the loop, which
+    research_pass and voice_call had and these two did not."""
+
+    def test_a_command_stream_past_its_deadline_is_abandoned(self):
+        with patch.object(W, "COMMAND_DEADLINE_S", -1), \
+             patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=_reply("VOLUME_UP")):
+            self.assertIsNone(W.detect_command("Zm9v", "key"))
+
+    def test_a_phrase_past_its_deadline_is_not_cached(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "filler.wav")
+        audio = [_Chunk({"status_code": 200, "output": {"choices": [
+            {"message": {"content": [{"audio": {"data": "AAAA"}}]}}]}})]
+        with patch.object(W, "PHRASE_DEADLINE_S", -1), \
+             patch.object(W.dashscope.MultiModalConversation, "call",
+                          return_value=audio):
+            self.assertFalse(W.synthesise_phrase("key", "等哈儿", path))
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".tmp"))
+
+
 class TestPlaybackTimeout(unittest.TestCase):
     def test_a_stalled_aplay_exits_so_systemd_restarts_the_service(self):
         stalled = W.subprocess.TimeoutExpired("aplay", W.APLAY_TIMEOUT_S)
@@ -325,7 +382,6 @@ class TestSessionCap(unittest.TestCase):
         st = {"voiced_ratio": 0.9, "longest_run_ms": 1000}
         speech = (b"\x00\x00" * 16000, "speech", st)
         with patch.object(W, "build_vad", return_value=MagicMock()), \
-             patch.object(W, "wait_for_audio_idle"), \
              patch.object(W, "pcm_rms", return_value=0), \
              patch.object(W, "POST_ACK_MIC_DISCARD_S", 0), \
              patch.object(W, "record_utterance", return_value=speech), \

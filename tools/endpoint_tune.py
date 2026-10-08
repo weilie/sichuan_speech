@@ -13,41 +13,17 @@ Recall is therefore reported per length bucket, never pooled. A setting is only
 shippable if it keeps the SHORT questions, because 现在几点 is what this device
 will actually be asked.
 """
-import sys, wave, itertools
-sys.path.insert(0, "/home/weilie/sichuan")
-import numpy as np
+import wave, itertools
 import webrtcvad
-import sherpa_onnx
-import wake_then_converse as W
+from _daemon import W
 
 DATA = "/home/weilie/sichuan/wake_data"
-SILERO = "/home/weilie/sichuan/models/silero_vad.onnx"
 BEEP_GUARD_S, WINDOW_S = 0.35, 7.0
 
 SPEECH = [("short", ["short1", "short2", "short3"]),
           ("med",   ["med1"]),
           ("long",  ["speech1"])]
 NOISE = ["nospeech1", "nospeech2", "nospeech3", "nospeech4", "nospeech5"]
-
-
-class SileroVad:
-    def __init__(self, threshold=0.5):
-        cfg = sherpa_onnx.VadModelConfig()
-        cfg.silero_vad.model = SILERO
-        cfg.silero_vad.threshold = threshold
-        cfg.sample_rate = W.CONV_RATE_IN
-        cfg.provider = "cpu"; cfg.num_threads = 1
-        self.model = sherpa_onnx.VadModel.create(cfg)
-        self.win = self.model.window_size()
-        self.buf = np.empty(0, dtype=np.float32); self.last = False
-
-    def is_speech(self, data, rate):
-        s = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-        self.buf = np.concatenate([self.buf, s])
-        while len(self.buf) >= self.win:
-            self.last = bool(self.model.is_speech(self.buf[:self.win].tolist()))
-            self.buf = self.buf[self.win:]
-        return self.last
 
 
 def frames(path, start_s, end_s):
@@ -73,17 +49,15 @@ def captures(mkvad, names):
 
 
 def passes(cap, run_ms, ratio):
-    if cap is None:
-        return False
-    utt_ms, st = cap
-    return not (utt_ms < W.MIN_UTTERANCE_MS or st["longest_run_ms"] < run_ms
-                or st["voiced_ratio"] < ratio)
+    # The device's own gate, with the two thresholds under sweep overridden.
+    return cap is not None and W.passes_gate(cap[0], cap[1], run_ms=run_ms, ratio=ratio)
 
 
 def main():
     vads = [("webrtcvad", lambda: webrtcvad.Vad(W.VAD_AGGRESSIVENESS)),
-            ("silero@0.5", lambda: SileroVad(0.5)),
-            ("silero@0.7", lambda: SileroVad(0.7))]
+            # The daemon's own shim, not a copy: what is measured is what ships.
+            ("silero@0.5", lambda: W.SileroVad(0.5)),
+            ("silero@0.7", lambda: W.SileroVad(0.7))]
     for label, mk in vads:
         buckets = {k: captures(mk, names) for k, names in SPEECH}
         noise = captures(mk, NOISE)

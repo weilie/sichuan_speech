@@ -1,3 +1,5 @@
 dashscope
+numpy
 pyaudio
+sherpa-onnx
 webrtcvad

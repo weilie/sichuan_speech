@@ -29,8 +29,10 @@
 - `src/utils.py`, `src/transcribe.py`, `src/synthesize.py` — ASR / TTS
   CLIs and the shared API-key setup.
 - `tools/` — measurement scripts (wake / VAD sweeps, corpus recording,
-  `usage-report.sh`). Most import `wake_then_converse` and expect the Pi's
-  `~/sichuan` paths.
+  `usage-report.sh`). The Python ones import the daemon through
+  `tools/_daemon.py` for its constants, `build_kws()`, `SileroVad` and
+  `passes_gate()`, so a sweep measures what ships; copy the directory
+  whole to the Pi. They expect the Pi's `~/sichuan` paths.
 - `deploy/sichuan.service` — the systemd user unit; see `docs/deployment.md`.
 - `enclosure/case.scad` — OpenSCAD source of truth for the enclosure.
   Rendered STLs (`enclosure/base.stl`, `enclosure/lid.stl`) are
@@ -111,4 +113,6 @@ back as `Invalid API-key provided`.
   does more than dialect enforcement — it also fixes persona ("filial
   grandchild talking to elders"), enforces brevity (2-3 sentences),
   and sets safety rails for medical / health / money topics. Preserve
-  those aspects if refactoring; feel free to iterate on wording.
+  those aspects if refactoring; feel free to iterate on wording. The
+  daemon's prompt is the current one; `converse.py` keeps a shorter
+  original on purpose (its extra rules need the research pass).

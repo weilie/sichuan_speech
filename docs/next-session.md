@@ -174,10 +174,9 @@ to beat is **1/4 detections closed vs 4/4 open**.
   enclosure's outer surface with gasketed ports, per the options
   above.
 
-Also still wrong: the lid's `mic_holes()` uses the old ~28 mm guess,
-so its two 3 mm holes have never been over the microphones. Left
-alone because the lid is not being reprinted, but fix it whenever the
-lid is next touched.
+The lid's two 3 mm holes (v1–v15) used the old ~28 mm guess and were
+never over the microphones. v16 removed them; the base's grille band
+is the mic path.
 
 ### (2) The voice/environment classifier needs better precision and recall
 
@@ -231,10 +230,13 @@ a wake phrase, not less.
   goes to a log nobody reads, so state the phrase out loud to whoever
   is recording.
 
-Note: `tools/sweep_vad.py` and `tools/vad_gate_sweep.py` build
-`webrtcvad.Vad` directly, so they measure the fallback engine, not the
-shipped Silero one. `tools/endpoint_tune.py` and `tools/vad_compare.py`
-cover Silero.
+Note: every tool reads the daemon's constants, `build_kws()` and
+`SileroVad` through `tools/_daemon.py`, so a sweep is always of the
+shipped setting (the KWS sweep also always includes the live cell and
+marks it). `tools/sweep_vad.py` defaults to the shipped Silero engine;
+`--vad webrtcvad` measures the fallback. `tools/endpoint_tune.py` and
+`tools/vad_speech_vs_noise.py` compare both. `vad_gate_sweep.py` and
+`vad_compare.py` were removed 2026-10-07 as superseded; git has them.
 
 ## 1. Chinese wake word — DONE 2026-07-04
 
@@ -338,14 +340,27 @@ print (mic ports in the base walls, §0b).
 - **Grille** on the lid's top face — hex-packed 2.5 mm holes over a
   44 mm circle above the driver cone. *Removed in v11.*
 - **Two 3 mm mic openings** on the lid (approximate positions above
-  the HAT V2 mics). *Still there, still at the old guess: v15b measured
-  the real mic positions ~20 mm away. Fix `mic_holes()` whenever the lid
-  is next touched. The v15 test uses ports in the base walls instead.*
+  the HAT V2 mics). *Removed in v16: v15b measured the real mic
+  positions ~20 mm away, and the base's grille band is the mic path.*
 - **LED viewing hole** in the lid, 5 mm circle above the Pi's
   PWR + ACT LED corner (for troubleshooting). *Removed in v14; now a
   10×2 mm slit in the -Y wall.*
 - **Snap-fit** — bumps on base long walls, matching recesses on lid
   inner lip. Confirmed to mate cleanly on v1 print.
+
+- *v16 (2026-10-05, not yet printed or measured): rounded vertical
+  corners (base r 8, lid r 10) and a 6 mm fillet on the lid top edge
+  (lid now prints top-face-up, supports inside), chamfered base edge;
+  v15's six test windows replaced by one band of twenty 2 × 14 mm slots
+  along the -X wall, to be backed with speaker cloth; the lid's two mic
+  holes removed. Mic Y positions re-measured from photos at world
+  y ≈ 10.5 and 71.5 — v15c had the second one behind a rib. Slot 0 is
+  centred on the first mic and the pitch is derived from the 61 mm mic
+  spacing (15 pitches, 4.07 mm), so a slot is centred on both measured
+  positions (2026-10-07; a fixed 4 mm pitch left one mic at a slot edge
+  and the other behind a rib). The band has about a third of v15c's
+  open area, so re-run the lid-closed wake corpus on it before calling
+  the enclosure done.*
 
 Commits `a7123fd` (v1) through `25a77e9` (v15c) — see `git log
 enclosure/` for the full iteration history and the rationale for
@@ -364,7 +379,7 @@ each change.
      so a tug on the external cable doesn't pull on the Pi's
      micro-USB connector. Still open.
    - **Mic-opening positions**: measured for the base ports in v15b;
-     the lid's `mic_holes()` still uses the old guess.
+     the lid's holes were removed in v16.
 3. **Aesthetics pass** (v11+): colour choice, texture, finish. Not
    urgent.
 
@@ -391,9 +406,10 @@ each change.
   speculative answer) classifies the utterance into `VOLUME_UP` /
   `VOLUME_DOWN` / `REPEAT` / none, and the Pi moves the HAT's `PCM`
   level itself, acknowledging with a cached spoken phrase. `REPEAT`
-  replays `/tmp/wake_response.wav`, which may be the last answer of an
-  EARLIER session — acceptable, since that is still the last thing the
-  device said. Two things need measuring
+  replays `/tmp/wake_response.wav` if it is less than `REPEAT_MAX_AGE_S`
+  (10 min) old — so someone who missed an answer and let the session
+  close can wake the device and still ask for it, while a reply from
+  hours ago gets "我刚才还没说啥子喃" instead. Two things need measuring
   on the device before this is trustworthy: the **false-positive rate**
   against the 2026-09-19 question corpus (a device that turns itself
   down mid-answer is worse than one that ignores the request), and

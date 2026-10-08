@@ -13,8 +13,8 @@ is masked (see `docs/smart-speaker.md §5` for the codec / PulseAudio
 notes).
 
 ```bash
-# In the venv. requirements.txt does not list numpy or sherpa-onnx yet.
-~/sichuan/.venv/bin/pip install -r ~/sichuan/requirements.txt numpy sherpa-onnx
+# In the venv.
+~/sichuan/.venv/bin/pip install -r ~/sichuan/requirements.txt
 # webrtcvad needs the legacy pkg_resources shim; setuptools ≥81 drops it
 ~/sichuan/.venv/bin/pip install "setuptools<81"
 ```
@@ -43,6 +43,14 @@ From this repo on the maintainer machine:
 scp deploy/sichuan.service weilie@sichuan-pi.local:~/.config/systemd/user/sichuan.service
 scp src/wake_then_converse.py weilie@sichuan-pi.local:~/sichuan/wake_then_converse.py
 ssh weilie@sichuan-pi.local 'systemctl --user daemon-reload && systemctl --user restart sichuan.service'
+```
+
+The measurement tools are not part of the service. When one is needed on
+the Pi, copy the directory whole — they import the deployed daemon through
+`tools/_daemon.py`, so a single tool copied on its own fails to import:
+
+```bash
+scp -r tools weilie@sichuan-pi.local:~/sichuan/
 ```
 
 ## First-time setup on the Pi
@@ -144,15 +152,16 @@ remote diagnosis starts from zero.
 - **PulseAudio startup noise in the journal is expected.** ALSA
   probes non-existent devices, JACK isn't installed, PulseAudio is
   masked. All harmless. Wait for `[ready] LISTENING…`.
-- **`After=network-online.target` does nothing in a user unit.** The user
-  manager has no such target (`systemctl --user status network-online.target`
-  says "could not be found"), so the service can start before Wi-Fi is up.
-  That is harmless today: the first cloud call happens on the first wake, and
-  the only boot-time network calls, `ensure_filler`'s one TTS call per
-  holding phrase, are all skipped once those phrases are cached. Note that a
-  wording added to `FILLER_PHRASES` costs one such call on the next boot, so a
-  boot with no network simply leaves that phrase out of the rotation until the
-  next one. Revisit if boot ever needs the network.
+- **The service can start before Wi-Fi is up.** The user manager has no
+  `network-online.target` (`systemctl --user status network-online.target`
+  says "could not be found"), so the `After=` line that used to name it did
+  nothing and was removed 2026-10-07. Harmless today: the first cloud call
+  happens on the first wake, and the only boot-time network calls, one TTS
+  call per cached phrase (four holding phrases plus six command
+  acknowledgements, ten on a first boot), are all skipped once the files
+  exist. A wording added to `FILLER_PHRASES` or `COMMAND_ACKS` costs one such
+  call on the next boot, so a boot with no network simply leaves that phrase
+  out until the next one. Revisit if boot ever needs the network.
 - **The Pi's timezone does not matter to the search date.** The date sent
   with search queries is pinned to `DEVICE_TZ` (Asia/Shanghai) in code. The Pi
   itself is set to America/New_York, which is fine.

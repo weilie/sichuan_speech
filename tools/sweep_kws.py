@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Grid-search the wake-word detector against recorded audio.
 
-    python3 sweep_kws.py --positives wake_data/positives.wav --said 20 \
-                         --negatives wake_data/negatives.wav
+    python3 tools/sweep_kws.py --positives wake_data/pos.wav --marks wake_data/pos.marks \
+                               --negatives wake_data/neg.wav
 
 Replays each file through sherpa-onnx at every (keywords_score,
 keywords_threshold) pair and reports recall and false alarms. Deterministic,
@@ -12,18 +12,18 @@ instead of re-tested by hand.
 sherpa-onnx exposes no per-result score, so sensitivity can only be explored
 by rebuilding the spotter per cell — hence the model reload each row.
 """
-import argparse, math, time, wave
+import argparse, wave
 import numpy as np
-from sherpa_onnx import KeywordSpotter
+from _daemon import W
 
 # Defaults are the Pi's paths; override with --model-dir / --keywords to run
 # the sweep on a faster machine. Decoding is deterministic, so results carry
 # over — but confirm the chosen setting on the Pi, whose sherpa-onnx build may
 # differ from the one doing the sweeping.
-MODEL_DIR = "/home/weilie/sichuan/models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
-KEYWORDS = "/home/weilie/sichuan/models/wake_keywords.txt"
-RATE = 16000
-CHUNK = 1600          # 100 ms, same as the live loop
+MODEL_DIR = W.KWS_MODEL_DIR
+KEYWORDS = W.KWS_KEYWORDS_FILE
+RATE = W.WAKE_RATE
+CHUNK = W.WAKE_CHUNK  # 100 ms, same as the live loop
 MIN_GAP_S = 1.0       # two hits closer than this are one utterance
 BEEP_LEN_S = 0.35     # skip the beep itself at the head of a window
 WINDOW_S = 4.2        # a beep's window: long enough for one slow utterance
@@ -31,15 +31,10 @@ LATE_TOLERANCE_S = 0.6
 
 
 def build(score, threshold, model_dir=MODEL_DIR, keywords=KEYWORDS):
-    return KeywordSpotter(
-        tokens=f"{model_dir}/tokens.txt",
-        encoder=f"{model_dir}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        decoder=f"{model_dir}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        joiner=f"{model_dir}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-        keywords_file=keywords, num_threads=2, max_active_paths=16,
-        keywords_score=score, keywords_threshold=threshold,
-        num_trailing_blanks=1, provider="cpu",
-    )
+    # The daemon's own builder, so the beam width under test is the one that
+    # ships. Two threads only make the replay faster.
+    return W.build_kws(score, threshold, model_dir=model_dir,
+                       keywords_file=keywords, num_threads=2)
 
 
 def read_wav(path):
@@ -107,22 +102,30 @@ def main():
     print()
     print(f"{'score':>6} {'thresh':>7} {'recall':>9} {'false':>6}  missed windows")
 
+    # The live cell is always in the grid, so every sweep reports the shipped
+    # setting beside the alternatives and marks it.
+    scores = sorted({float(x) for x in args.scores.split(",")} | {W.KWS_SCORE})
+    thresholds = sorted({float(x) for x in args.thresholds.split(",")}
+                        | {W.KWS_THRESHOLD})
     best = []
-    for score in [float(x) for x in args.scores.split(",")]:
-        for thr in [float(x) for x in args.thresholds.split(",")]:
-            hits = detections(build(score, thr, args.model_dir, args.keywords), pos)
+    for score in scores:
+        for thr in thresholds:
+            # One spotter per cell: detections() keeps its state in the
+            # stream it creates, so positives and negatives can share it.
+            spotter = build(score, thr, args.model_dir, args.keywords)
+            hits = detections(spotter, pos)
             missed = score_windows(hits, windows)
             got = len(windows) - len(missed)
             recall = got / len(windows) if windows else 0.0
-            false = (len(detections(build(score, thr, args.model_dir, args.keywords), neg))
-                     if neg is not None else -1)
+            false = len(detections(spotter, neg)) if neg is not None else -1
             if not missed and false == 0:
                 best.append((score, thr))
             note = "none  <== clean" if not missed and false == 0 else (
                    "none" if not missed else ",".join(str(m) for m in missed[:8])
                    + ("..." if len(missed) > 8 else ""))
+            live = "  <-- LIVE" if (score, thr) == (W.KWS_SCORE, W.KWS_THRESHOLD) else ""
             print(f"{score:>6.1f} {thr:>7.2f} {got:>3}/{len(windows):<3} {recall:>4.0%} "
-                  f"{false if false >= 0 else '-':>6}  {note}")
+                  f"{false if false >= 0 else '-':>6}  {note}{live}")
     print()
     if best:
         print("Settings with full recall and zero false alarms:")

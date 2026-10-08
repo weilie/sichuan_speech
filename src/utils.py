@@ -17,5 +17,6 @@ def setup_dashscope():
 def handle_api_response(response, error_msg):
     """Checks the API response status and exits on error."""
     if response.status_code != 200:
-        sys.exit(f"API Error ({response.status_code}): {response.message}")
+        sys.exit(f"{error_msg}: API Error ({response.status_code}): "
+                 f"{response.message}")
     return response.output

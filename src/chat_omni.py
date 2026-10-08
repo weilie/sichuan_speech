@@ -149,7 +149,7 @@ def run_chat(gender):
     dashscope.api_key = api_key
 
     voice = {"female": "Sunny", "male": "Eric"}.get(gender, "Sunny")
-    print(f"Initializing Real-time Voice Chat...")
+    print("Initializing Real-time Voice Chat...")
     print(f"Using Sichuan voice: {voice} ({gender})")
 
     callback = VoiceBotCallback()
