@@ -31,16 +31,22 @@ ALERT_USD="${ALERT_USD:-1}"
 CY="${CYCLE%-*}"; CM="${CYCLE#*-}"
 NEXT=$(printf '%04d-%02d' $(( 10#$CM == 12 ? CY + 1 : CY )) $(( 10#$CM % 12 + 1 )))
 
-# Every page of one DescribeInstanceBill query, one JSON document per line.
+# Every page of one DescribeInstanceBill query, ONE JSON document PER LINE.
 # Extra arguments narrow the query (e.g. --Granularity DAILY --BillingDate).
+# The CLI pretty-prints its JSON across many lines, so each page is
+# re-serialised compact before it is emitted; the parsers below split on
+# newlines and would otherwise choke on the first "{".
 bill_pages() {
-  local token="" page
+  local token="" page compact
   while :; do
     page=$(aliyun bssopenapi DescribeInstanceBill --BillingCycle "$CYCLE" --ProductCode sfm \
       --IsBillingItem true --MaxResults 300 ${token:+--NextToken "$token"} "$@" \
       --profile "$PROFILE" --region ap-southeast-1) || return 1
-    printf '%s\n' "$page"
-    token=$(printf '%s' "$page" | node -e '
+    compact=$(printf '%s' "$page" | node -e '
+      let s = ""; process.stdin.on("data", d => s += d).on("end", () =>
+        process.stdout.write(JSON.stringify(JSON.parse(s))))') || return 1
+    printf '%s\n' "$compact"
+    token=$(printf '%s' "$compact" | node -e '
       let s = ""; process.stdin.on("data", d => s += d).on("end", () =>
         process.stdout.write(JSON.parse(s).Data?.NextToken ?? ""))') || return 1
     [ -n "$token" ] || break
