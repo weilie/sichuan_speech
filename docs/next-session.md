@@ -3,10 +3,10 @@
 Originally captured 2026-07-03 with two work streams: Chinese wake
 word (software) and enclosure (hardware). **Wake word done**
 2026-07-04. Enclosure moved from Snips-STL fit-check into our own
-OpenSCAD design (v1 → v15c between 2026-07-03 and 2026-09-21; the
-v14 print fit-tested clean on 2026-07-19). The v15c mic-port test
-print is the last open enclosure piece before the parents' build, but
-see §0: re-measure wake recall before printing more.
+OpenSCAD design (v1 → v16 between 2026-07-03 and 2026-10-07; the
+v14 print fit-tested clean on 2026-07-19). The v16 print and a
+lid-closed wake-corpus run on it are the last open enclosure pieces
+before the parents' build (§2).
 
 Also delivered since first capture: Sichuan system-prompt expansion
 (2026-07-08, commit `e699d43`) — grandchild persona, brevity cap,
@@ -105,11 +105,14 @@ in SHORT questions (30 → 24 → 13 of 30) while medium and long hold at 10/10.
 
 ## 0b. The two problems of 2026-09-19 — history, partly superseded
 
-**Status as of 2026-09-28.** (2) is resolved: webrtcvad was replaced by
+**Status as of 2026-10-13.** (2) is resolved: webrtcvad was replaced by
 Silero (§0a). (1) is unresolved and its premise is in doubt: every number
-below was taken at beam 4 (§0), so re-measure lid-closed recall at beam 16
-before acting on it. The text stays as the record of what was measured and
-why.
+below was taken at beam 4, and at beam 16 the lid-closed corpus already
+scores 94% on the v14 print (§0). v15c was never printed; the design moved
+on to v16 (§2), whose slot band has about a third of v15c's open area.
+The decisive measurement is the lid-closed corpus on the v16 print, and
+there is no record of it yet. The text stays as the record of what was
+measured and why.
 
 ### (1) The microphones need a hardware change
 
@@ -312,13 +315,13 @@ glue-scripting, training, deploying.
 - **Baidu / Alibaba / iFlyTek APIs**: cloud-based (adds latency,
   requires internet per wake) or per-device commercial licensing.
 
-## 2. Enclosure — v15c current, v10 baseline below
+## 2. Enclosure — v16 current (not yet printed), v10 baseline below
 
 Design source of truth is `enclosure/case.scad` (OpenSCAD).
 Rendered STLs `enclosure/base.stl` and `enclosure/lid.stl` are
 regenerated from it. Iterations 1 → 10 converged on the list below;
-later changes are marked in italics. The open item is the v15c test
-print (mic ports in the base walls, §0b).
+later changes are marked in italics. The open item is the v16 print
+and the lid-closed wake-corpus run on it (see the v16 note below).
 
 
 - **Base outer 99 × 99 × 47 mm** (truly square, walls 3 mm)
@@ -362,15 +365,17 @@ print (mic ports in the base walls, §0b).
   open area, so re-run the lid-closed wake corpus on it before calling
   the enclosure done.*
 
-Commits `a7123fd` (v1) through `25a77e9` (v15c) — see `git log
+Commits `a7123fd` (v1) through `6b84b8c` (v16) — see `git log
 enclosure/` for the full iteration history and the rationale for
-each change.
+each change. Slicer projects (`*.3mf`) are git-ignored as per-print
+state; the `.scad` and the rendered STLs are what the repo keeps.
 
 ### Next steps
 
 1. ~~Print and fit-check~~ **DONE for v14, 2026-07-19**: everything
    mates, the M3 screws self-tap and hold the speaker, the cable
-   passes the grommet. What is left to print is v15c (§0b).
+   passes the grommet. What is left to print is v16 (v15c was
+   superseded unprinted).
 2. **Still-missing features** in `case.scad`:
    - **Ventilation**: the v15 -X wall slots double as vents, but a
      Pi 3B under sustained load has been seen at 58 °C (+10 °C once
@@ -416,6 +421,12 @@ each change.
   whether 4 dB per step and the 12 dB floor are the right sizes by ear
   in the parents' room. Also unheard so far: the five acknowledgement
   phrases.
+
+- **Voice-clone trial — tried, not adopted.** `tools/voice_clone.py`
+  (2026-10-06) enrols a sample with `qwen-voice-enrollment` and speaks
+  through `qwen3-tts-vc`; the branch `voice-clone-trial` merged only a
+  shorter-replies prompt change (`9c95610`) and the daemon kept Eric.
+  The script stays as a dev tool for the next attempt.
 
 Carried over from `docs/smart-speaker.md`:
 
