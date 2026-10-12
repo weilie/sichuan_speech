@@ -2,15 +2,17 @@
 
 ## Read first
 
-- `docs/next-session.md` — active punch list. Current focus: re-measure
-  lid-closed wake recall at the beam-16 setting (§0) before spending more
-  print time; the v15c enclosure test print (mic ports in the base walls)
-  is the open enclosure item.
+- `docs/next-session.md` — active punch list. Current focus: print the
+  v16 enclosure and run the lid-closed wake corpus on it (§0, §2). Every
+  lid-open-vs-closed number before 2026-09-28 was taken at beam 4 and the
+  v16 slot band has a third of v15c's open area, so that run decides
+  whether the enclosure is done.
 - `docs/smart-speaker.md` — full roadmap, hardware/software constraints
   we've validated, and non-obvious gotchas (PulseAudio, .bashrc
   key-parsing, ALSA mixer persistence, power-cable dominance).
 - `docs/deployment.md` — the systemd user service on the Pi: install /
-  update commands, env file, persistent journal, gotchas.
+  update commands, env file, persistent journal, gotchas, and the
+  arrival runbook for joining a new Wi-Fi via the iPhone hotspot.
 
 ## Repo shape
 
@@ -20,16 +22,21 @@
   but the service does not use it, it sends no persona prompt, and it
   reads only `DASHSCOPE_API_KEY`.
 - `src/wake_then_converse.py` — the deployed daemon: wake word, then a
-  multi-turn conversation (Silero VAD endpointing with a webrtcvad
-  fallback; two-round web-search path). Uses sherpa-onnx KWS with wake
-  phrase 麻婆豆腐 (pinyin-tokenised; keyword file at
-  `~/sichuan/models/wake_keywords.txt` on the Pi). The date sent with
-  search queries is pinned to Asia/Shanghai in code, so the Pi's own
-  timezone does not matter.
+  multi-turn conversation against `qwen3.5-omni-flash` (Silero VAD
+  endpointing with a webrtcvad fallback; two-round web-search path; voice
+  Eric). Uses sherpa-onnx KWS with wake phrase 麻婆豆腐 (pinyin-tokenised;
+  keyword file at `~/sichuan/models/wake_keywords.txt` on the Pi). Also
+  handles spoken device commands (volume up / down, repeat the last
+  answer) through a third parallel classifier call, rotates a pool of
+  cached holding phrases while a search runs, and caps a session at 10
+  cloud turns with a spoken sign-off. The date sent with search queries
+  is pinned to Asia/Shanghai in code, so the Pi's own timezone does not
+  matter.
 - `src/utils.py`, `src/transcribe.py`, `src/synthesize.py` — ASR / TTS
   CLIs and the shared API-key setup.
 - `tools/` — measurement scripts (wake / VAD sweeps, corpus recording,
-  `usage-report.sh`). The Python ones import the daemon through
+  `usage-report.sh`) plus `voice_clone.py`, a standalone voice-cloning
+  CLI (plain HTTP, runs on the Mac). The measurement ones import the daemon through
   `tools/_daemon.py` for its constants, `build_kws()`, `SileroVad` and
   `passes_gate()`, so a sweep measures what ships; copy the directory
   whole to the Pi. They expect the Pi's `~/sichuan` paths.
@@ -37,7 +44,8 @@
 - `enclosure/case.scad` — OpenSCAD source of truth for the enclosure.
   Rendered STLs (`enclosure/base.stl`, `enclosure/lid.stl`) are
   regenerated from this. Iterate: edit `.scad` → `openscad -o
-  base.stl -D 'part="base"' case.scad` (same for `"lid"`).
+  base.stl -D 'part="base"' case.scad` (same for `"lid"`). Slicer
+  projects (`*.3mf`) are git-ignored: they are per-print state, not source.
 - `enclosure/snips-reference/` — original Cults3D STLs, kept only as
   historical reference (not used for the current design).
 

@@ -464,6 +464,16 @@ interaction):
   with auto-restart landed 2026-07-19. See `docs/deployment.md`.
   Still open: cleaner reconnect on network blips. Journal caps landed
   2026-09-19.
+- ✅ Spoken device commands and holding phrases. A third parallel call
+  at turn start classifies the utterance into volume up / down / repeat
+  (`2a0219f`, 2026-09-30), acknowledged in words rather than a chirp
+  (`3a33144`); `REPEAT` replays the last answer within a 10-minute window
+  (`716aefc`). While a search runs the device rotates a pool of cached
+  holding phrases instead of one recording (`852b2f7`, 2026-09-28). Voice
+  switched Sunny → Eric the same day (`af60310`); a voice-clone trial on
+  2026-10-06 did not replace it (see `docs/next-session.md` §3). Still
+  unmeasured: the command classifier's false-positive rate on the
+  question corpus.
 
 Device-shape work (makes it deployable to parents):
 - ⬜ Record audio cues and ship as WAV assets.
@@ -476,23 +486,29 @@ Device-shape work (makes it deployable to parents):
 - 🟨 Reliability layer: systemd unit (2026-07-19) and persistent, capped
   journal (2026-09-19) landed. Open: time-sync wait before any cloud call,
   detecting a hung (not crashed) process, SSD boot if used.
-- ⬜ Remote access: Tailscale + fallback hotspot SSID + parents' Wi-Fi
-  pre-flashed before transport.
+- 🟨 Remote access: fallback hotspot SSID saved and tested (2026-10-08;
+  see `docs/deployment.md` "Changing Wi-Fi"). Open: Tailscale, and
+  parents' Wi-Fi (their SSID is not known before transport, so it is added
+  on site via the hotspot).
 - ⬜ Health alerting: heartbeat endpoint, daemon posts to it,
   missing-heartbeat alert to maintainer's phone.
-- 🟨 3D-printed enclosure. Design in `enclosure/case.scad` (v15c as
-  of 2026-09-21): 99×99×47 mm square base + 103×103×33 mm lid,
-  snap-fit, Pi rotated 90° for long-axis vertical fit, front-mounted
-  DMA45-4 speaker (36 mm screw pattern), cable grommet, LED side slit.
-  The v14 print fit-tested cleanly (2026-07-19). **Still open:** the
-  v15c test print, with oversized mic ports in the base walls, to see
-  whether it recovers the lid-closed wake penalty (re-measure that
-  penalty at the current beam width first), and an internal cable
-  strain-relief boss. See `docs/next-session.md` §0 and §2.
+- 🟨 3D-printed enclosure. Design in `enclosure/case.scad` (v16 as
+  of 2026-10-07): 99×99×47 mm square base + 103×103×33 mm lid with
+  rounded corners and a filleted lid top, snap-fit, Pi rotated 90° for
+  long-axis vertical fit, front-mounted DMA45-4 speaker (36 mm screw
+  pattern), cable grommet, LED side slit, and a band of twenty slots
+  along the -X wall centred on the measured mic positions (replaces
+  v15c's oversized test ports, which were never printed). The v14 print
+  fit-tested cleanly (2026-07-19). **Still open:** print v16 and run the
+  lid-closed wake corpus on it (at beam 16 the v14 print already scores
+  94% lid-closed, so the old 7.8 dB penalty may not matter), and an
+  internal cable strain-relief boss. See `docs/next-session.md` §0 and §2.
 - ⬜ Multi-week soak at maintainer's home, including forced Wi-Fi
   outage, unclean shutdown, and cloud-session kill. Verify recovery
   and that health alerts fire.
-- ⬜ Transport and install at parents'.
+- ⬜ Transport and install at parents'. Network side is scripted:
+  `docs/deployment.md` "Changing Wi-Fi" is the step-by-step for getting
+  the Pi onto their Wi-Fi through the iPhone hotspot.
 
 ### Phase 2 — Quality of life
 - ⬜ Safer OTA updates with rollback (so a bad update doesn't brick a
@@ -520,7 +536,7 @@ Device-shape work (makes it deployable to parents):
 ## 7. Document Status
 
 - Created: 2026-06-11
-- Last updated: 2026-09-28 (status brought in line with the code: Silero VAD, two-round search, in-session memory, systemd service and persistent journal, enclosure v15c; earlier: 2026-07-19 systemd user service, enclosure v14)
+- Last updated: 2026-10-13 (spoken commands, holding-phrase pool, session cap, voice-clone trial, enclosure v16, hotspot fallback; earlier: 2026-09-28 Silero VAD, two-round search, in-session memory, systemd service and persistent journal, enclosure v15c; 2026-07-19 systemd user service, enclosure v14)
 - Owner: maintainer
 - Next review: when Phase 1's first conversation-shape items (wake
   word, end-of-speech, multi-turn memory) start landing — at that

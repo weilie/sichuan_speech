@@ -141,6 +141,85 @@ journalctl -b -1 -n 200                        # the PREVIOUS boot, now retained
 If this Pi is ever reimaged, re-apply the drop-in: without it every
 remote diagnosis starts from zero.
 
+## Changing Wi-Fi (moving the speaker)
+
+The Pi runs Debian 13 with NetworkManager and keeps every saved network,
+joining whichever is in range, highest `autoconnect-priority` first. Saved
+profiles: `netplan-wlan0-TheNet` (home, priority 0) and `hotspot` (the
+maintainer's iPhone, priority -10, added and tested 2026-10-08: the Pi
+joined it, SSH worked over it, and a spoken conversation completed). The
+hotspot profile is the bridge for every move: it lets the laptop reach the
+Pi anywhere, before the Pi knows the local network.
+
+### Arrival runbook (parents' home, or any new place)
+
+Do this on the Pi over SSH, not as one-line `ssh host '...'` commands:
+`sudo` needs the account password and a one-liner has no terminal for the
+prompt.
+
+1. **Turn on the iPhone hotspot** with Settings → Personal Hotspot →
+   Maximize Compatibility on. The Pi 3 is 2.4 GHz only and will not see the
+   hotspot without it. Leave the Settings page open so the hotspot stays
+   discoverable.
+2. **Plug the Pi in** and wait about a minute. With no known network in
+   range it joins the hotspot on its own (the profile autoconnects). The
+   phone's hotspot page shows one connected device.
+3. **Join the Mac to the same hotspot**, then:
+   ```bash
+   ssh weilie@sichuan-pi.local
+   ```
+   If `.local` does not resolve over the hotspot, find the Pi by MAC:
+   `arp -a | grep -iE 'b8:27:eb|dc:a6:32|d8:3a:dd'` and SSH to that IP.
+4. **Find the parents' network** (the rescan needs `sudo`; without it the
+   list can be stale):
+   ```bash
+   sudo nmcli device wifi rescan && nmcli -f SSID,CHAN,FREQ,SIGNAL device wifi list
+   ```
+   Only 2.4 GHz entries are usable. If the router is dual-band under one
+   name, the 2.4 GHz band is the one the Pi will get.
+5. **Save it** (priority 0 beats the hotspot's -10, so once saved the Pi
+   prefers the house network and keeps the hotspot as fallback):
+   ```bash
+   sudo nmcli connection add type wifi ifname wlan0 con-name parents \
+     ssid "THEIR_SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "THEIR_PASSWORD" \
+     connection.autoconnect yes connection.autoconnect-priority 0
+   ```
+   Quote the SSID in double quotes if it has an apostrophe or spaces, and
+   store exactly what the router broadcasts (`nmcli -t -f SSID device wifi
+   list | od -c` shows a curly `’` if there is one).
+6. **Switch to it**: `sudo nmcli connection up parents`. The SSH session
+   drops because the Pi leaves the hotspot. If the join fails the Pi falls
+   back to the hotspot by itself, so a wrong password costs a retry, not a
+   trip to the router.
+7. **Move the Mac to the parents' Wi-Fi**, SSH back in, and verify:
+   ```bash
+   nmcli -t -f NAME,DEVICE connection show --active   # expect parents:wlan0
+   systemctl --user status sichuan.service --no-pager | head -3
+   ```
+   Then say 麻婆豆腐 and ask something that needs a search, so the cloud
+   path is proven on the new network. Turn the hotspot off last.
+8. **Reboot once** (`sudo reboot`) and confirm it comes back on `parents`
+   without the hotspot on. That is the state it will live in.
+
+Nothing to join at all but a router with a free port: an Ethernet cable
+works with no setup. If the Pi never appears on the hotspot, check
+Maximize Compatibility first, then power-cycle the Pi with the hotspot
+already on.
+
+### Notes
+
+- **The hotspot profile is tied to the maintainer's phone.** A new phone,
+  a renamed hotspot, or a changed hotspot password means updating the
+  `hotspot` profile at home before the next trip (`sudo nmcli connection
+  modify hotspot wifi-sec.psk "NEW"`, or delete and re-add it), and
+  re-testing the join.
+- To test a profile without leaving home: `sudo nmcli connection up
+  hotspot` (the SSH session drops; rejoin the Mac to the hotspot). Return
+  with `sudo nmcli connection up netplan-wlan0-TheNet`, or power-cycle.
+  A failed attempt falls back to `TheNet` on its own.
+- `nmcli connection show` lists every saved profile; `sudo nmcli connection
+  delete NAME` removes one.
+
 ## Non-obvious gotchas
 
 - **User service, not system service.** Under `~/.config/systemd/user/`,

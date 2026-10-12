@@ -8,15 +8,19 @@ for the roadmap and `docs/deployment.md` for running it on the Pi.
 ## What's here
 - `src/wake_then_converse.py`: **the smart speaker.** Wake-word listening
   (sherpa-onnx), on-device end-of-speech detection, multi-turn conversation
-  against `qwen3.5-omni-flash` with web search for real-time questions. Runs
-  on the Pi as a systemd user service.
+  against `qwen3.5-omni-flash` with web search for real-time questions. It
+  also takes spoken commands (louder, quieter, say that again), plays a
+  rotating holding phrase while a search runs, and ends a session after 10
+  cloud turns with a spoken sign-off. Runs on the Pi as a systemd user
+  service.
 - `src/converse.py`: press-to-talk, single turn, non-realtime.
 - `src/chat_omni.py`: realtime WebSocket chat. Half-duplex, no barge-in, and
   not used by the service.
 - `src/transcribe.py`, `src/synthesize.py`: ASR (`qwen3-asr-flash`) and TTS
   (`qwen3-tts-flash`, voices `Sunny` and `Eric`) command-line tools.
-- `tools/`: wake-word and VAD measurement scripts, corpus recording, and
-  `usage-report.sh` (month-to-date spend and device activity).
+- `tools/`: wake-word and VAD measurement scripts, corpus recording,
+  `usage-report.sh` (month-to-date spend and device activity), and
+  `voice_clone.py` (enrol a voice sample with Qwen-TTS and speak through it).
 - `deploy/`, `docs/`, `enclosure/`: systemd unit, documentation, and the
   OpenSCAD source for the 3D-printed case.
 
